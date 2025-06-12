@@ -16,8 +16,9 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 --- Helper Function for MarkdownV2 Escaping ---
 
-def escape_markdown_v2(text: str) -> str: escape_chars = '_*~`>#+-=|{}.!' return ''.join('\' + char if char in escape_chars else char for char in text)
-
+def escape_markdown_v2(text: str) -> str:
+    escape_chars = r"_*~`>#+-=|{}.![]()"
+    return ''.join(['\\' + c if c in escape_chars else c for c in text])
 --- Bot Commands ---
 
 async def start(update: Update, context): await update.message.reply_text( "👋 Hi there! I'm your payment confirmation bot.\n\n" "Please send your payment details in the following format:\n\n" "✅ I have successfully completed the payment.\n\n" "📱 Telegram Username: @YourUsername\n" "💳 Transaction ID: YourTransactionID\n" "💰 Amount Paid: ₹X\n" "⏳ Time Period: Y Days\n\n" "📸 You can also send the payment screenshot. Please reply to my confirmation message with the screenshot.\n\n" "🙏 Thank you!" )
