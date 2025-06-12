@@ -89,7 +89,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🙏 Thank you!\n\n"
         "🔹 Use /mypayments to view your payment history\n"
         "🔹 Use /cancel to cancel a pending payment\n"
-        "💡 You can submit new payments anytime - existing payments will remain valid until expiration"
+        "💡 You can submit new payments anytime"
     )
 
 async def create_new_payment(user_id, username, transaction_id, amount, days, context, message):
@@ -148,7 +148,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Check if message is a photo (screenshot)
     if message.photo:
-        # Forward screenshot to log channel without storing in DB
         if LOG_CHANNEL_ID:
             try:
                 await context.bot.send_photo(
@@ -171,6 +170,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username, transaction_id, amount, days = match.groups()[:4]
     user_id = message.from_user.id
 
+    # Store payment data in context for callback handling
+    context.user_data['pending_payment'] = {
+        'user_id': user_id,
+        'username': username,
+        'transaction_id': transaction_id,
+        'amount': amount,
+        'days': days
+    }
+
     # Check if user has an active approved payment
     existing_approved = payments_collection.find_one({
         "user_id": user_id,
@@ -183,14 +191,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remaining_time = expiry_date - get_utc_now()
         remaining_days = remaining_time.days
         
-        # Create keyboard for payment override
         keyboard = [
-            [
-                InlineKeyboardButton("✅ Yes, submit new payment", 
-                                    callback_data=f"override_{user_id}_{amount}_{days}_{transaction_id}"),
-                InlineKeyboardButton("❌ No, keep existing", 
-                                    callback_data="cancel_override")
-            ]
+            [InlineKeyboardButton("✅ Yes, submit new payment", callback_data="confirm_new")],
+            [InlineKeyboardButton("❌ No, keep existing", callback_data="cancel_new")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -214,6 +217,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
     
     if existing_pending:
+        keyboard = [
+            [InlineKeyboardButton("✅ Submit New Payment", callback_data="confirm_replace")],
+            [InlineKeyboardButton("❌ Keep Existing", callback_data="keep_existing")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         status_message = (
             "⏳ You already have a pending payment:\n\n"
             f"💳 Transaction ID: {existing_pending['transaction_id']}\n"
@@ -221,17 +230,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🕒 Submitted: {ensure_timezone_aware(existing_pending['created_at']).strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
             "You can submit a new payment if needed - the previous pending payment will be cancelled."
         )
-        
-        # Create keyboard to confirm new payment
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Submit New Payment", 
-                                    callback_data=f"newpayment_{user_id}_{amount}_{days}_{transaction_id}"),
-                InlineKeyboardButton("❌ Keep Existing", 
-                                    callback_data="keep_pending")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
         
         await message.reply_text(status_message, reply_markup=reply_markup)
         return
@@ -390,47 +388,45 @@ async def handle_callback(update: Update, context: CallbackContext):
         logger.error(f"Unexpected error in callback: {e}")
         await query.edit_message_text(text="❌ An unexpected error occurred. Please try again.")
 
-async def handle_override_callback(update: Update, context: CallbackContext):
-    """Handle payment override callback"""
+async def handle_payment_decision(update: Update, context: CallbackContext):
+    """Handle user's decision about new payment submission"""
     query = update.callback_query
     await query.answer()
     
-    data = query.data
-    if data == "cancel_override":
-        await query.edit_message_text(text="❌ New payment submission cancelled.")
-        return
-    elif data == "keep_pending":
-        await query.edit_message_text(text="ℹ️ Keeping your existing pending payment.")
+    user_data = context.user_data.get('pending_payment')
+    if not user_data:
+        await query.edit_message_text(text="⚠️ Payment data not found. Please start over.")
         return
     
-    try:
-        if data.startswith("override_"):
-            # Handle override of existing active payment
-            _, user_id, amount, days, transaction_id = data.split("_")
-            user = await context.bot.get_chat(user_id)
-            username = user.username if user.username else f"user_{user_id}"
-            
-            await create_new_payment(user_id, username, transaction_id, amount, days, context, query.message)
-            await query.edit_message_text(text="✅ New payment submitted alongside your existing active payment!")
-            
-        elif data.startswith("newpayment_"):
-            # Handle new payment replacing pending payment
-            _, user_id, amount, days, transaction_id = data.split("_")
-            user = await context.bot.get_chat(user_id)
-            username = user.username if user.username else f"user_{user_id}"
-            
-            # Cancel existing pending payment
-            payments_collection.update_one(
-                {"user_id": user_id, "status": "pending"},
-                {"$set": {"status": "cancelled", "updated_at": get_utc_now()}}
-            )
-            
-            await create_new_payment(user_id, username, transaction_id, amount, days, context, query.message)
-            await query.edit_message_text(text="✅ New payment submitted (previous pending payment cancelled)!")
-            
-    except Exception as e:
-        logger.error(f"Error handling override callback: {e}")
-        await query.edit_message_text(text="⚠️ Failed to process your request. Please try again.")
+    user_id = user_data['user_id']
+    username = user_data['username']
+    transaction_id = user_data['transaction_id']
+    amount = user_data['amount']
+    days = user_data['days']
+    
+    if query.data == "confirm_new":
+        # Submit new payment alongside existing
+        await create_new_payment(user_id, username, transaction_id, amount, days, context, query.message)
+        await query.edit_message_text(text="✅ New payment submitted alongside your existing active payment!")
+    
+    elif query.data == "cancel_new":
+        await query.edit_message_text(text="❌ New payment submission cancelled.")
+    
+    elif query.data == "confirm_replace":
+        # Cancel existing pending payment and create new one
+        payments_collection.update_one(
+            {"user_id": user_id, "status": "pending"},
+            {"$set": {"status": "cancelled", "updated_at": get_utc_now()}}
+        )
+        await create_new_payment(user_id, username, transaction_id, amount, days, context, query.message)
+        await query.edit_message_text(text="✅ New payment submitted (previous pending payment cancelled)!")
+    
+    elif query.data == "keep_existing":
+        await query.edit_message_text(text="ℹ️ Keeping your existing pending payment.")
+    
+    # Clear the temporary payment data
+    if 'pending_payment' in context.user_data:
+        del context.user_data['pending_payment']
 
 def main():
     """Start the bot"""
@@ -444,6 +440,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO, handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback, pattern="^(approve|reject)_"))
+    application.add_handler(CallbackQueryHandler(handle_payment_decision, pattern="^(confirm_new|cancel_new|confirm_replace|keep_existing)$"))
 
     # Run the bot
     logger.info("Bot is starting...")
