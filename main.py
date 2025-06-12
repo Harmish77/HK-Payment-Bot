@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 import pymongo
@@ -47,6 +47,10 @@ PAYMENT_PATTERN = re.compile(
     r"🙏 Thank you!",
     re.IGNORECASE
 )
+
+def get_utc_now():
+    """Get current time in UTC with timezone awareness"""
+    return datetime.now(timezone.utc)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -103,8 +107,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "amount": int(amount),
         "days": int(days),
         "status": "pending",
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow()
+        "created_at": get_utc_now(),
+        "updated_at": get_utc_now()
     }
     payment_id = payments_collection.insert_one(payment_data).inserted_id
 
@@ -152,15 +156,17 @@ async def handle_callback(update: Update, context: CallbackContext):
             await query.edit_message_text(text="❌ Payment not found!")
             return
 
+        current_time = get_utc_now()
+
         if action == "approve":
-            expiry_date = datetime.utcnow() + timedelta(days=payment["days"])
+            expiry_date = current_time + timedelta(days=payment["days"])
             update_result = payments_collection.update_one(
                 {"_id": payment_id},
                 {
                     "$set": {
                         "status": "approved",
                         "expiry_date": expiry_date,
-                        "updated_at": datetime.utcnow()
+                        "updated_at": current_time
                     }
                 }
             )
@@ -175,7 +181,7 @@ async def handle_callback(update: Update, context: CallbackContext):
                              f"💳 Transaction ID: {payment['transaction_id']}\n"
                              f"💰 Amount: ₹{payment['amount']}\n"
                              f"⏳ Valid for: {payment['days']} days\n"
-                             f"📅 Expires on: {expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                             f"📅 Expires on: {expiry_date.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     )
                 except Exception as e:
                     print(f"Error notifying user: {e}")
@@ -196,7 +202,7 @@ async def handle_callback(update: Update, context: CallbackContext):
                                  f"💳 Transaction ID: {payment['transaction_id']}\n"
                                  f"💰 Amount: ₹{payment['amount']}\n"
                                  f"⏳ Period: {payment['days']} days\n"
-                                 f"📅 Expires: {expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                                 f"📅 Expires: {expiry_date.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                         )
                     except Exception as e:
                         print(f"Error logging to channel: {e}")
@@ -204,7 +210,7 @@ async def handle_callback(update: Update, context: CallbackContext):
         elif action == "reject":
             update_result = payments_collection.update_one(
                 {"_id": payment_id},
-                {"$set": {"status": "rejected", "updated_at": datetime.utcnow()}}
+                {"$set": {"status": "rejected", "updated_at": current_time}}
             )
 
             if update_result.modified_count > 0:
@@ -241,7 +247,7 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_callback))
 
     # Run the bot
-    print("Bot is running...")
+    print("Bot is running with timezone-aware datetime handling...")
     application.run_polling()
 
 if __name__ == "__main__":
