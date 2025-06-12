@@ -69,6 +69,12 @@ def get_utc_now():
     """Get current time in UTC with timezone awareness"""
     return datetime.now(timezone.utc)
 
+def ensure_timezone_aware(dt):
+    """Ensure datetime is timezone aware (UTC if no timezone)"""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a welcome message with payment instructions"""
     await update.message.reply_text(
@@ -127,18 +133,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💳 Transaction ID: {existing_payment['transaction_id']}\n"
                 f"💰 Amount: ₹{existing_payment['amount']}\n"
                 f"⏳ Period: {existing_payment['days']} days\n"
-                f"🕒 Submitted: {existing_payment['created_at'].strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+                f"🕒 Submitted: {ensure_timezone_aware(existing_payment['created_at']).strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
                 "Please wait for admin approval or use /cancel to cancel this payment."
             )
         else:  # approved
-            remaining_time = existing_payment["expiry_date"] - get_utc_now()
+            expiry_date = ensure_timezone_aware(existing_payment["expiry_date"])
+            remaining_time = expiry_date - get_utc_now()
             remaining_days = remaining_time.days
             status_message = (
                 "✅ You already have an approved active payment.\n\n"
                 f"💳 Transaction ID: {existing_payment['transaction_id']}\n"
                 f"💰 Amount: ₹{existing_payment['amount']}\n"
                 f"⏳ Period: {existing_payment['days']} days\n"
-                f"📅 Expires: {existing_payment['expiry_date'].strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+                f"📅 Expires: {expiry_date.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
                 f"⏱️ Remaining: {remaining_days} days\n\n"
                 "You can submit a new payment after this one expires."
             )
@@ -202,9 +209,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def my_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's payment history"""
     user_id = update.message.from_user.id
-    payments = payments_collection.find({"user_id": user_id}).sort("created_at", -1)
+    payments = list(payments_collection.find({"user_id": user_id}).sort("created_at", -1))
     
-    if payments.count() == 0:
+    if not payments:
         await update.message.reply_text("📭 You don't have any payment history yet.")
         return
     
@@ -216,10 +223,11 @@ async def my_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💳 ID: {payment['transaction_id']}\n"
             f"💰 Amount: ₹{payment['amount']}\n"
             f"⏳ Period: {payment['days']} days\n"
-            f"📅 Date: {payment['created_at'].strftime('%Y-%m-%d %H:%M')}\n"
+            f"📅 Date: {ensure_timezone_aware(payment['created_at']).strftime('%Y-%m-%d %H:%M')}\n"
         )
         if payment["status"] == "approved":
-            remaining = (payment["expiry_date"] - get_utc_now()).days
+            expiry_date = ensure_timezone_aware(payment["expiry_date"])
+            remaining = (expiry_date - get_utc_now()).days
             msg += f"⏱️ Remaining: {remaining} days\n"
         messages.append(msg)
     
