@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional
 
 import pymongo
+from bson import ObjectId
 from dotenv import load_dotenv
 from telegram import (
     Update,
@@ -18,6 +19,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
     ContextTypes,
+    CallbackContext,
 )
 
 # Load environment variables
@@ -124,87 +126,109 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Payment ID: {payment_id}"
     )
 
-    await context.bot.send_message(
-        chat_id=ADMIN_CHAT_ID,
-        text=admin_message,
-        reply_markup=reply_markup
-    )
-
-    await message.reply_text("Your payment has been submitted for approval. Thank you!")
-
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-    payment_id = data.split("_")[1]
-    action = data.split("_")[0]
-
-    # Update payment status
-    payment = payments_collection.find_one({"_id": pymongo.ObjectId(payment_id)})
-    if not payment:
-        await query.answer("Payment not found!")
-        return
-
-    if action == "approve":
-        expiry_date = datetime.utcnow() + timedelta(days=payment["days"])
-        payments_collection.update_one(
-            {"_id": pymongo.ObjectId(payment_id)},
-            {
-                "$set": {
-                    "status": "approved",
-                    "expiry_date": expiry_date,
-                    "updated_at": datetime.utcnow()
-                }
-            }
-        )
-
-        # Notify user
+    try:
         await context.bot.send_message(
-            chat_id=payment["user_id"],
-            text=f"🎉 Your payment has been approved!\n\n"
-                 f"📱 Username: @{payment['username']}\n"
-                 f"💳 Transaction ID: {payment['transaction_id']}\n"
-                 f"💰 Amount: ₹{payment['amount']}\n"
-                 f"⏳ Valid for: {payment['days']} days\n"
-                 f"📅 Expires on: {expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+            chat_id=ADMIN_CHAT_ID,
+            text=admin_message,
+            reply_markup=reply_markup
         )
+        await message.reply_text("Your payment has been submitted for approval. Thank you!")
+    except Exception as e:
+        print(f"Error sending message to admin: {e}")
+        await message.reply_text("There was an error processing your payment. Please try again later.")
 
-        # Update admin message
-        await query.edit_message_text(
-            text=f"✅ Approved payment:\n\n{query.message.text}",
-            reply_markup=None
-        )
+async def handle_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
 
-        # Log to channel
-        if LOG_CHANNEL_ID:
-            await context.bot.send_message(
-                chat_id=LOG_CHANNEL_ID,
-                text=f"💰 Payment Approved\n\n"
-                     f"👤 User: @{payment['username']}\n"
-                     f"💳 Transaction ID: {payment['transaction_id']}\n"
-                     f"💰 Amount: ₹{payment['amount']}\n"
-                     f"⏳ Period: {payment['days']} days\n"
-                     f"📅 Expires: {expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+    try:
+        data = query.data
+        action, payment_id = data.split("_")
+        payment_id = ObjectId(payment_id)
+
+        # Update payment status
+        payment = payments_collection.find_one({"_id": payment_id})
+        if not payment:
+            await query.edit_message_text(text="❌ Payment not found!")
+            return
+
+        if action == "approve":
+            expiry_date = datetime.utcnow() + timedelta(days=payment["days"])
+            update_result = payments_collection.update_one(
+                {"_id": payment_id},
+                {
+                    "$set": {
+                        "status": "approved",
+                        "expiry_date": expiry_date,
+                        "updated_at": datetime.utcnow()
+                    }
+                }
             )
 
-    elif action == "reject":
-        payments_collection.update_one(
-            {"_id": pymongo.ObjectId(payment_id)},
-            {"$set": {"status": "rejected", "updated_at": datetime.utcnow()}}
-        )
+            if update_result.modified_count > 0:
+                # Notify user
+                try:
+                    await context.bot.send_message(
+                        chat_id=payment["user_id"],
+                        text=f"🎉 Your payment has been approved!\n\n"
+                             f"📱 Username: @{payment['username']}\n"
+                             f"💳 Transaction ID: {payment['transaction_id']}\n"
+                             f"💰 Amount: ₹{payment['amount']}\n"
+                             f"⏳ Valid for: {payment['days']} days\n"
+                             f"📅 Expires on: {expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                    )
+                except Exception as e:
+                    print(f"Error notifying user: {e}")
 
-        # Notify user
-        await context.bot.send_message(
-            chat_id=payment["user_id"],
-            text="❌ Your payment has been rejected. Please contact support if you believe this is an error."
-        )
+                # Update admin message
+                await query.edit_message_text(
+                    text=f"✅ Approved payment:\n\n{query.message.text}",
+                    reply_markup=None
+                )
 
-        # Update admin message
-        await query.edit_message_text(
-            text=f"❌ Rejected payment:\n\n{query.message.text}",
-            reply_markup=None
-        )
+                # Log to channel
+                if LOG_CHANNEL_ID:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=LOG_CHANNEL_ID,
+                            text=f"💰 Payment Approved\n\n"
+                                 f"👤 User: @{payment['username']}\n"
+                                 f"💳 Transaction ID: {payment['transaction_id']}\n"
+                                 f"💰 Amount: ₹{payment['amount']}\n"
+                                 f"⏳ Period: {payment['days']} days\n"
+                                 f"📅 Expires: {expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                        )
+                    except Exception as e:
+                        print(f"Error logging to channel: {e}")
 
-    await query.answer()
+        elif action == "reject":
+            update_result = payments_collection.update_one(
+                {"_id": payment_id},
+                {"$set": {"status": "rejected", "updated_at": datetime.utcnow()}}
+            )
+
+            if update_result.modified_count > 0:
+                # Notify user
+                try:
+                    await context.bot.send_message(
+                        chat_id=payment["user_id"],
+                        text="❌ Your payment has been rejected. Please contact support if you believe this is an error."
+                    )
+                except Exception as e:
+                    print(f"Error notifying user: {e}")
+
+                # Update admin message
+                await query.edit_message_text(
+                    text=f"❌ Rejected payment:\n\n{query.message.text}",
+                    reply_markup=None
+                )
+
+    except ValueError as e:
+        print(f"Error processing callback: {e}")
+        await query.edit_message_text(text="❌ Error processing request. Invalid data format.")
+    except Exception as e:
+        print(f"Unexpected error in callback: {e}")
+        await query.edit_message_text(text="❌ An unexpected error occurred. Please try again.")
 
 def main():
     # Create the Application
@@ -217,6 +241,7 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_callback))
 
     # Run the bot
+    print("Bot is running...")
     application.run_polling()
 
 if __name__ == "__main__":
