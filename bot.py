@@ -19,8 +19,6 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 def escape_markdown_v2(text: str) -> str:
     escape_chars = r"_*~`>#+-=|{}.![]()"
     return ''.join(['\\' + c if c in escape_chars else c for c in text])
---- Bot Commands ---
-
 async def start(update: Update, context): await update.message.reply_text( "👋 Hi there! I'm your payment confirmation bot.\n\n" "Please send your payment details in the following format:\n\n" "✅ I have successfully completed the payment.\n\n" "📱 Telegram Username: @YourUsername\n" "💳 Transaction ID: YourTransactionID\n" "💰 Amount Paid: ₹X\n" "⏳ Time Period: Y Days\n\n" "📸 You can also send the payment screenshot. Please reply to my confirmation message with the screenshot.\n\n" "🙏 Thank you!" )
 
 async def handle_message(update: Update, context): if update.message.photo: photo = update.message.photo[-1] file_id = photo.file_id new_file = await context.bot.get_file(file_id) filename = f"/tmp/screenshot_{file_id}.jpg" await new_file.download_to_drive(filename)
