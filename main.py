@@ -164,50 +164,63 @@ async def register_new_user(user_id: int, username: str) -> bool:
         logger.error(f"Failed to register user {user_id}: {e}")
         return False
 
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
-    # Critical: This forces Start button to appear
+    # 1. Force Start button to appear if no args
     if not context.args:
         await context.bot.send_message(
             chat_id=user.id,
-            text=" ",
+            text=" ",  # Empty message forces button display
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("START MOVIEHUB", callback_data="init_bot")]
             ])
         )
         return
     
-    # Handle your payment links
-    if context.args[0].startswith('direct_'):
-        try:
-            data = json.loads(urllib.parse.unquote(context.args[0][7:]))
-            
-            # Validate critical fields
-            if not all(key in data for key in ['u', 't', 'a', 'p']):
-                raise ValueError("Missing payment fields")
-            
-            # Process payment
-            context.user_data['payment'] = {
-                'username': data['u'],
-                'txn_id': data['t'],
-                'amount': data['a'],
-                'period': data['p']
-            }
-            
-            await update.message.reply_text(
-                f"Payment received for @{data['u']}\n"
-                f"TXN: {data['t']}\n"
-                f"Amount: ₹{data['a']}\n"
-                f"Period: {data['p']}\n\n"
-                "Send screenshot now.",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            
-        except Exception as e:
-            logger.error(f"Payment error: {str(e)}")
-            await update.message.reply_text("Payment processing failed. Contact support.")
-
+    # 2. Handle payment links
+    try:
+        # Add Base64 padding if needed and decode
+        encoded = context.args[0] + '=' * (-len(context.args[0]) % 4
+        decoded = base64.b64decode(encoded).decode('utf-8')
+        
+        # Split into components
+        username, txn_id, amount, period = decoded.split('|')
+        
+        # Store payment data (with period formatting)
+        context.user_data['payment'] = {
+            'username': username,
+            'txn_id': txn_id,
+            'amount': int(amount),
+            'period': period.replace('Month', ' Month')  # Add space if needed
+        }
+        
+        # Send payment confirmation
+        await update.message.reply_text(
+            "✅ Payment Received!\n\n"
+            f"👤 @{username}\n"
+            f"💳 {txn_id}\n"
+            f"💰 ₹{amount}\n"
+            f"⏳ {period.replace('Month', ' Month')}\n\n"
+            "📸 Please send your payment screenshot now.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        
+        # Log successful payment
+        logger.info(f"Payment received from @{username} - TXN: {txn_id}")
+        
+    except Exception as e:
+        logger.error(f"Start handler error: {str(e)}")
+        await update.message.reply_text(
+            "⚠️ Couldn't process payment link\n"
+            "Please send:\n"
+            "1. Payment screenshot\n"
+            "2. Transaction ID\n"
+            "3. Amount paid\n\n"
+            "We'll process it manually.",
+            reply_markup=ReplyKeyboardRemove()
+                                          )
 async def handle_payment_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await send_log_to_channel(
