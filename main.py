@@ -166,75 +166,47 @@ async def register_new_user(user_id: int, username: str) -> bool:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await register_new_user(user.id, user.username)  # Always register user
     
-    # Handle web form redirects
-    if context.args and context.args[0].startswith('web_'):
+    # Critical: This forces Start button to appear
+    if not context.args:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=" ",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("START MOVIEHUB", callback_data="init_bot")]
+            ])
+        )
+        return
+    
+    # Handle your payment links
+    if context.args[0].startswith('direct_'):
         try:
-            # Decode the payment data
-            payment_data = json.loads(urllib.parse.unquote(context.args[0][4:]))
+            data = json.loads(urllib.parse.unquote(context.args[0][7:]))
             
-            # Validate required fields
-            required_fields = ['u', 't', 'a', 'p']
-            if not all(field in payment_data for field in required_fields):
-                raise ValueError("Missing required payment fields")
+            # Validate critical fields
+            if not all(key in data for key in ['u', 't', 'a', 'p']):
+                raise ValueError("Missing payment fields")
             
-            # Store in context for screenshot handling
-            context.user_data['pending_payment'] = {
-                'username': payment_data['u'],
-                'transaction_id': payment_data['t'],
-                'amount': payment_data['a'],
-                'period': payment_data['p'],
-                'source': 'web_form'
+            # Process payment
+            context.user_data['payment'] = {
+                'username': data['u'],
+                'txn_id': data['t'],
+                'amount': data['a'],
+                'period': data['p']
             }
             
-            # Send confirmation message
             await update.message.reply_text(
-                "📋 Payment Details Received from Web Form:\n\n"
-                f"👤 Username: @{payment_data['u']}\n"
-                f"💳 TXN ID: {payment_data['t']}\n"
-                f"💰 Amount: ₹{payment_data['a']}\n"
-                f"⏳ Period: {payment_data['p']}\n\n"
-                "📸 Please send your payment screenshot now to complete verification.",
+                f"Payment received for @{data['u']}\n"
+                f"TXN: {data['t']}\n"
+                f"Amount: ₹{data['a']}\n"
+                f"Period: {data['p']}\n\n"
+                "Send screenshot now.",
                 reply_markup=ReplyKeyboardRemove()
             )
             
-            # Log successful redirect
-            await send_log_to_channel(
-                f"🌐 Web Form Redirect Success\n"
-                f"👤 @{payment_data['u']}\n"
-                f"💳 {payment_data['t']}\n"
-                f"💰 ₹{payment_data['a']}",
-                bot=context.bot
-            )
-            return
-            
         except Exception as e:
-            logger.error(f"Web form redirect error: {str(e)}")
-            await update.message.reply_text(
-                "⚠️ Couldn't process your payment details.\n"
-                "Please send:\n"
-                "1. Your payment screenshot\n"
-                "2. Transaction ID\n"
-                "3. Amount paid\n\n"
-                "We'll process it manually."
-            )
-            await send_log_to_channel(
-                f"🔴 Web Form Redirect Failed\n"
-                f"User: @{user.username if user else 'unknown'}\n"
-                f"Error: {str(e)[:200]}",
-                bot=context.bot
-            )
-            return
-    
-    # Normal start command
-    await update.message.reply_text(
-        "Welcome to MovieHub Premium!\n\n"
-        "To subscribe, please visit our payment form:",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Open Payment Form", url="https://harmish77.github.io/HK_payment_V0/")]
-        ])
-        )
+            logger.error(f"Payment error: {str(e)}")
+            await update.message.reply_text("Payment processing failed. Contact support.")
 
 async def handle_payment_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
