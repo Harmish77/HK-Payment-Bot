@@ -167,77 +167,85 @@ async def register_new_user(user_id: int, username: str) -> bool:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    await register_new_user(user.id, user.username)  # Always register user
     
-    # Always register/update user
-    await register_new_user(user.id, user.username)
-    
-    # 1. Handle payment links from website
     if context.args:
         try:
-            # Fix Base64 padding and decode
-            encoded = context.args[0] + '=' * (-len(context.args[0]) % 4)
+            # 1. Fix Base64 padding and decode
+            encoded = context.args[0]
+            padding = len(encoded) % 4
+            if padding:
+                encoded += '=' * (4 - padding)
+            
             decoded = base64.b64decode(encoded).decode('utf-8')
             
-            # Split into components (username|txn_id|amount|period)
-            username, txn_id, amount, period = decoded.split('|')
+            # 2. Split into components and validate
+            parts = decoded.split('|')
+            if len(parts) != 4:
+                raise ValueError("Invalid data format")
+                
+            username, txn_id, amount, period = parts
             
-            # Validate transaction ID
+            # Validate transaction ID (12 digits)
+            if not re.fullmatch(r'\d{12}', txn_id):
+                raise ValueError("Transaction ID must be 12 digits")
+            
+            # 3. Format period display (3Months → 3 Months)
+            period_display = re.sub(r'(\d+)([a-zA-Z]+)', r'\1 \2', period)
+            
+            # 4. Check for duplicate transaction
             if transactions_collection.find_one({"transaction_id": txn_id}):
-                await update.message.reply_text("❌ This transaction ID was already used.")
+                await update.message.reply_text("⚠️ This transaction was already processed.")
                 return
             
-            # Store payment data
+            # 5. Store payment data
             context.user_data['payment'] = {
-                'user_id': user.id,
                 'username': username,
-                'transaction_id': txn_id,
-                'amount': int(amount),
-                'period': period.replace('Month', ' Month'),  # Format nicely
+                'txn_id': txn_id,
+                'amount': amount,
+                'period': period,
+                'period_display': period_display,
                 'source': 'web_form'
             }
             
-            # Send payment confirmation
+            # 6. Send confirmation
             await update.message.reply_text(
-                "✅ Payment Received from Website!\n\n"
-                f"👤 Username: @{username}\n"
-                f"💳 TXN ID: {txn_id}\n"
-                f"💰 Amount: ₹{amount}\n"
-                f"⏳ Period: {period.replace('Month', ' Month')}\n\n"
+                "✅ Payment Received!\n\n"
+                f"👤 @{username}\n"
+                f"💳 {txn_id}\n"
+                f"💰 ₹{amount}\n"
+                f"⏳ {period_display}\n\n"
                 "📸 Please send your payment screenshot now.",
                 reply_markup=ReplyKeyboardRemove()
             )
             
-            # Log successful payment
-            await send_log_to_channel(
-                f"🌐 <b>Web Payment Received</b>\n"
-                f"👤 @{username}\n"
-                f"💳 {txn_id}\n"
-                f"💰 ₹{amount}\n"
-                f"⏳ {period}",
-                bot=context.bot
-            )
-            
-            return
+            # Log successful processing
+            logger.info(f"Processed web payment: {txn_id}")
             
         except Exception as e:
-            logger.error(f"Payment link error: {str(e)}")
+            logger.error(f"Link error: {str(e)}\nData: {context.args[0]}")
             await update.message.reply_text(
-                "⚠️ Couldn't process payment link\n"
-                "Please send:\n"
-                "1. Payment screenshot\n"
-                "2. Transaction ID\n"
-                "3. Amount paid\n\n"
-                "We'll process it manually."
+                "⚠️ Payment link invalid\n"
+                "Please send manually:\n"
+                "1. Screenshot\n"
+                "2. TXN ID\n"
+                "3. Amount\n"
+                "4. Period\n\n"
+                "Example:\n"
+                "TXN: 56666667777\n"
+                "Amount: ₹60\n"
+                "Period: 3 Months"
             )
+        return
     
-    # 2. Normal start command
+    # Normal start command
     await update.message.reply_text(
         "Welcome to MovieHub Premium!",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Payment Form", url="https://harmish77.github.io/HK_payment_V0/")],
-            [InlineKeyboardButton("My Payments", callback_data="my_payments")]
+            [InlineKeyboardButton("Payment Form", url="https://harmish77.github.io/HK_payment_V0/")]
         ])
-    )
+            )
+
 
 async def handle_payment_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
