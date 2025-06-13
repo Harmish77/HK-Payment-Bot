@@ -5,6 +5,7 @@ import logging
 import asyncio
 import signal
 import traceback
+import base64 
 from datetime import datetime, timezone
 from typing import Dict, Optional, List
 
@@ -164,63 +165,80 @@ async def register_new_user(user_id: int, username: str) -> bool:
         logger.error(f"Failed to register user {user_id}: {e}")
         return False
 
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
-    # 1. Force Start button to appear if no args
-    if not context.args:
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=" ",  # Empty message forces button display
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("START MOVIEHUB", callback_data="init_bot")]
-            ])
-        )
-        return
+    # Always register/update user
+    await register_new_user(user.id, user.username)
     
-    # 2. Handle payment links
-    try:
-        # Add Base64 padding if needed and decode
-        encoded = context.args[0] + '=' * (-len(context.args[0]) % 4)
-        decoded = base64.b64decode(encoded).decode('utf-8')
-        
-        # Split into components
-        username, txn_id, amount, period = decoded.split('|')
-        
-        # Store payment data (with period formatting)
-        context.user_data['payment'] = {
-            'username': username,
-            'txn_id': txn_id,
-            'amount': int(amount),
-            'period': period.replace('Month', ' Month')  # Add space if needed
-        }
-        
-        # Send payment confirmation
-        await update.message.reply_text(
-            "✅ Payment Received!\n\n"
-            f"👤 @{username}\n"
-            f"💳 {txn_id}\n"
-            f"💰 ₹{amount}\n"
-            f"⏳ {period.replace('Month', ' Month')}\n\n"
-            "📸 Please send your payment screenshot now.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        
-        # Log successful payment
-        logger.info(f"Payment received from @{username} - TXN: {txn_id}")
-        
-    except Exception as e:
-        logger.error(f"Start handler error: {str(e)}")
-        await update.message.reply_text(
-            "⚠️ Couldn't process payment link\n"
-            "Please send:\n"
-            "1. Payment screenshot\n"
-            "2. Transaction ID\n"
-            "3. Amount paid\n\n"
-            "We'll process it manually.",
-            reply_markup=ReplyKeyboardRemove()
-                                          )
+    # 1. Handle payment links from website
+    if context.args:
+        try:
+            # Fix Base64 padding and decode
+            encoded = context.args[0] + '=' * (-len(context.args[0]) % 4)
+            decoded = base64.b64decode(encoded).decode('utf-8')
+            
+            # Split into components (username|txn_id|amount|period)
+            username, txn_id, amount, period = decoded.split('|')
+            
+            # Validate transaction ID
+            if transactions_collection.find_one({"transaction_id": txn_id}):
+                await update.message.reply_text("❌ This transaction ID was already used.")
+                return
+            
+            # Store payment data
+            context.user_data['payment'] = {
+                'user_id': user.id,
+                'username': username,
+                'transaction_id': txn_id,
+                'amount': int(amount),
+                'period': period.replace('Month', ' Month'),  # Format nicely
+                'source': 'web_form'
+            }
+            
+            # Send payment confirmation
+            await update.message.reply_text(
+                "✅ Payment Received from Website!\n\n"
+                f"👤 Username: @{username}\n"
+                f"💳 TXN ID: {txn_id}\n"
+                f"💰 Amount: ₹{amount}\n"
+                f"⏳ Period: {period.replace('Month', ' Month')}\n\n"
+                "📸 Please send your payment screenshot now.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            
+            # Log successful payment
+            await send_log_to_channel(
+                f"🌐 <b>Web Payment Received</b>\n"
+                f"👤 @{username}\n"
+                f"💳 {txn_id}\n"
+                f"💰 ₹{amount}\n"
+                f"⏳ {period}",
+                bot=context.bot
+            )
+            
+            return
+            
+        except Exception as e:
+            logger.error(f"Payment link error: {str(e)}")
+            await update.message.reply_text(
+                "⚠️ Couldn't process payment link\n"
+                "Please send:\n"
+                "1. Payment screenshot\n"
+                "2. Transaction ID\n"
+                "3. Amount paid\n\n"
+                "We'll process it manually."
+            )
+    
+    # 2. Normal start command
+    await update.message.reply_text(
+        "Welcome to MovieHub Premium!",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Payment Form", url="https://harmish77.github.io/HK_payment_V0/")],
+            [InlineKeyboardButton("My Payments", callback_data="my_payments")]
+        ])
+    )
+
 async def handle_payment_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await send_log_to_channel(
@@ -264,46 +282,42 @@ async def handle_payment_message(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
-    if 'pending_payment' not in context.user_data:
+    if 'payment' not in context.user_data:
         await update.message.reply_text(
-            "Please submit payment details first via our website:",
+            "Please submit payment details first.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("Payment Form", url="https://harmish77.github.io/HK_payment_V0/")]
             ])
         )
         return
         
-    payment_data = context.user_data['pending_payment']
+    payment_data = context.user_data['payment']
     
-    # Additional validation
-    if not update.message.photo:
-        await update.message.reply_text("Please send the screenshot as a photo (not file).")
-        return
-        
-    # Save to database with source marker
+    # Save to database
     payment_id = payments_collection.insert_one({
         "user_id": user.id,
         "username": payment_data['username'],
         "transaction_id": payment_data['transaction_id'],
-        "amount": int(payment_data['amount']),
+        "amount": payment_data['amount'],
         "period": payment_data['period'],
         "status": "pending",
-        "source": "web_form",
+        "source": payment_data.get('source', 'bot'),
         "created_at": get_utc_now(),
         "screenshot_id": update.message.photo[-1].file_id
     }).inserted_id
     
-    # Notify admin with special web form marker
+    # Notify admin
+    caption = (f"🌐 <b>Web Payment</b>\n\n" if payment_data.get('source') == 'web_form' else "") + \
+              f"👤 @{payment_data['username']} (ID: {user.id})\n" + \
+              f"💳 {payment_data['transaction_id']}\n" + \
+              f"💰 ₹{payment_data['amount']}\n" + \
+              f"⏳ {payment_data['period']}\n" + \
+              f"🆔 {payment_id}"
+    
     await context.bot.send_photo(
         chat_id=ADMIN_CHAT_ID,
         photo=update.message.photo[-1].file_id,
-        caption=(
-            f"🌐 <b>Web Form Payment</b>\n\n"
-            f"👤 User: @{payment_data['username']} (ID: {user.id})\n"
-            f"💳 TXN: {payment_data['transaction_id']}\n"
-            f"💰 ₹{payment_data['amount']} for {payment_data['period']}\n"
-            f"🆔 Payment ID: {payment_id}"
-        ),
+        caption=caption,
         reply_markup=InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("✅ Approve", callback_data=f"approve_{payment_id}"),
@@ -314,12 +328,11 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     await update.message.reply_text(
-        "✅ Verification submitted!\n\n"
-        "Your payment is now pending admin approval.\n"
-        "You'll receive a notification when processed."
+        "✅ Payment submitted for approval!\n"
+        "You'll be notified when processed."
     )
     
-    del context.user_data['pending_payment']
+    del context.user_data['payment']
 
 async def my_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
