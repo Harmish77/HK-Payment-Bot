@@ -629,11 +629,13 @@ async def start_http_server():
     logger.info(f"HTTP server running on port {PORT}")
     return runner  # Important for proper cleanup
 
-async def setup_bot():
-    """Setup the Telegram bot application"""
-    application = Application.builder().token(BOT_TOKEN).build()
 
-    # Add handlers
+async def main():
+    """Main async function to run both services"""
+    # Create application instance
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Add all your handlers here (same as in your setup_bot() function)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("mypayments", my_payments))
     application.add_handler(CommandHandler("stats", stats))
@@ -652,40 +654,56 @@ async def setup_bot():
     application.add_handler(CallbackQueryHandler(handle_callback, pattern="^(approve|reject)_"))
     application.add_handler(CallbackQueryHandler(handle_admin_callbacks, pattern="^(confirm_wipe|cancel_wipe)$"))
     
-    return application
-
-async def main():
-    """Main async function to run both services"""
-    # Setup bot
-    application = await setup_bot()
-    
-    # Start HTTP server (for health checks)
+    # Start HTTP server
     http_runner = await start_http_server()
     
     try:
-        # Run bot
-        await application.run_polling()
+        # Run the bot
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling()
+        
+        # Keep the application running
+        while True:
+            await asyncio.sleep(3600)  # Sleep for 1 hour
+            
     except asyncio.CancelledError:
         logger.info("Received shutdown signal")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
     finally:
-        # Proper cleanup
-        logger.info("Shutting down...")
+        logger.info("Shutting down services...")
+        # Shutdown bot
+        if application.running:
+            await application.updater.stop()
+            await application.stop()
+            await application.shutdown()
+        # Shutdown HTTP server
         await http_runner.cleanup()
-        await application.stop()
-        await application.shutdown()
+        logger.info("All services stopped")
 
 if __name__ == "__main__":
     try:
-        # Create a new event loop
+        # Create and set event loop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        # Run the main function
-        loop.run_until_complete(main())
+        # Run main until complete
+        main_task = loop.create_task(main())
+        
+        # Handle keyboard interrupt
+        def shutdown():
+            main_task.cancel()
+            
+        loop.add_signal_handler(signal.SIGINT, shutdown)
+        loop.add_signal_handler(signal.SIGTERM, shutdown)
+        
+        loop.run_until_complete(main_task)
+        
     except KeyboardInterrupt:
         logger.info("Bot shutting down...")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         sys.exit(1)
+    finally:
+        loop.close()
