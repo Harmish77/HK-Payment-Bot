@@ -12,13 +12,7 @@ from typing import Dict, Optional, List
 import pymongo
 from bson import ObjectId
 from dotenv import load_dotenv
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InputMediaPhoto,
-    Bot
-)
+from telegram import (Update,InlineKeyboardButton,InlineKeyboardMarkup,InputMediaPhoto,ReplyKeyboardRemove,Bot)
 from telegram.ext import (
     Application,
     CommandHandler,
