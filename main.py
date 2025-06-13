@@ -631,12 +631,16 @@ async def start_http_server():
     return runner  # Important for proper cleanup
 
 
+
 async def main():
-    """Main async function to run both services"""
-    # Create application instance
+    """Main entry point for the application"""
+    # Setup the HTTP server first
+    http_runner = await start_http_server()
+    
+    # Then setup the bot
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Add all your handlers here (same as in your setup_bot() function)
+    # Add all your handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("mypayments", my_payments))
     application.add_handler(CommandHandler("stats", stats))
@@ -654,57 +658,38 @@ async def main():
     # Callback handlers
     application.add_handler(CallbackQueryHandler(handle_callback, pattern="^(approve|reject)_"))
     application.add_handler(CallbackQueryHandler(handle_admin_callbacks, pattern="^(confirm_wipe|cancel_wipe)$"))
-    
-    # Start HTTP server
-    http_runner = await start_http_server()
+    # ... [add all other handlers] ...
     
     try:
-        # Run the bot
+        # Start the bot
         await application.initialize()
         await application.start()
         await application.updater.start_polling()
         
-        # Keep the application running
+        # Keep the application running forever
         while True:
             await asyncio.sleep(3600)  # Sleep for 1 hour
             
-    except asyncio.CancelledError:
+    except Exception as e:
+        logger.error(f"Error: {e}")
+    finally:
+        logger.info("Shutting down...")
+        if 'application' in locals():
+            await application.updater.stop()
+            await application.stop()
+            await application.shutdown()
+        await http_runner.cleanup()
+if __name__ == "__main__":
+    # Create and set event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
         logger.info("Received shutdown signal")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
     finally:
-        logger.info("Shutting down services...")
-        # Shutdown bot
-        if application.running:
-            await application.updater.stop()
-            await application.stop()
-            await application.shutdown()
-        # Shutdown HTTP server
-        await http_runner.cleanup()
-        logger.info("All services stopped")
-
-if __name__ == "__main__":
-    try:
-        # Create and set event loop
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # Run main until complete
-        main_task = loop.create_task(main())
-        
-        # Handle keyboard interrupt
-        def shutdown():
-            main_task.cancel()
-            
-        loop.add_signal_handler(signal.SIGINT, shutdown)
-        loop.add_signal_handler(signal.SIGTERM, shutdown)
-        
-        loop.run_until_complete(main_task)
-        
-    except KeyboardInterrupt:
-        logger.info("Bot shutting down...")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        sys.exit(1)
-    finally:
         loop.close()
+        logger.info("Bot stopped")
