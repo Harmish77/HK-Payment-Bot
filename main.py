@@ -1,6 +1,7 @@
 import os
 import re
 import logging
+import asyncio
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
@@ -47,19 +48,22 @@ if not all([BOT_TOKEN, ADMIN_CHAT_ID, MONGODB_URI]):
 client = pymongo.MongoClient(MONGODB_URI)
 db = client["payment_bot"]
 payments_collection = db["payments"]
+transactions_collection = db["transactions"]
+users_collection = db["users"]
 
 # Create indexes
 payments_collection.create_index([("user_id", 1)])
 payments_collection.create_index([("status", 1)])
+transactions_collection.create_index([("transaction_id", 1)], unique=True)
+users_collection.create_index([("user_id", 1)], unique=True)
 
-# Updated payment message pattern with flexible time periods
+# Payment message pattern
 PAYMENT_PATTERN = re.compile(
     r"✅ I have successfully completed the payment.\s*"
     r"📱 Telegram Username: @([^\s]+)\s*"
     r"💳 Transaction ID: (\d+)\s*"
     r"💰 Amount Paid: ₹(\d+)\s*"
     r"⏳ Time Period: (\d+)\s*(day|days|month|months|year)\s*"
-    r"(📸 I will send the payment screenshot shortly.\s*)?"
     r"🙏 Thank you!",
     re.IGNORECASE
 )
@@ -68,133 +72,57 @@ def get_utc_now():
     """Get current time in UTC with timezone awareness"""
     return datetime.now(timezone.utc)
 
+def convert_period_to_days(period_num, period_unit):
+    """Convert time period to days"""
+    period_unit = period_unit.lower()
+    if period_unit in ['day', 'days']:
+        return int(period_num)
+    elif period_unit in ['month', 'months']:
+        return int(period_num) * 30
+    elif period_unit == 'year':
+        return int(period_num) * 365
+    return int(period_num)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a welcome message with payment instructions"""
+    """Send welcome message with instructions"""
+    user_id = update.message.from_user.id
+    users_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {"username": update.message.from_user.username, "last_seen": get_utc_now()}},
+        upsert=True
+    )
+    
     await update.message.reply_text(
         "Welcome to the Payment Bot! 💰\n\n"
-        "📝 To submit a payment, please send a message in this format:\n\n"
-        "✅ I have successfully completed the payment.\n\n"
+        "📝 To submit a payment:\n"
+        "1. Send payment details in format:\n\n"
+        "✅ I have successfully completed the payment.\n"
         "📱 Telegram Username: @your_username\n"
         "💳 Transaction ID: 123456789\n"
         "💰 Amount Paid: ₹100\n"
-        "⏳ Time Period: 30 days (or 1 month, 1 year, etc.)\n\n"
-        "📸 I will send the payment screenshot shortly.\n"
+        "⏳ Time Period: 30 days\n"
         "🙏 Thank you!\n\n"
-        "🔹 Use /mypayments to view your payment history\n"
-        "🔹 Use /cancel to cancel a pending payment\n"
-        "🔹 Admins: /stats to view bot statistics"
+        "2. Then send payment screenshot\n\n"
+        "🔹 Commands:\n"
+        "/mypayments - View your payment history\n"
+        "/help - Show instructions"
     )
 
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show bot statistics (admin only)"""
-    user_id = update.message.from_user.id
-    
-    if str(user_id) != ADMIN_CHAT_ID:
-        await update.message.reply_text("❌ This command is only available for admins.")
-        return
-    
-    try:
-        total_users = len(payments_collection.distinct("user_id"))
-        db_stats = db.command("dbStats")
-        storage_size = db_stats.get("storageSize", 0)
-        data_size = db_stats.get("dataSize", 0)
-        
-        def convert_size(size_bytes):
-            if size_bytes < 1024:
-                return f"{size_bytes} bytes"
-            elif size_bytes < 1024*1024:
-                return f"{size_bytes/1024:.2f} KB"
-            else:
-                return f"{size_bytes/(1024*1024):.2f} MB"
-        
-        stats_message = (
-            "📊 Bot Statistics\n\n"
-            f"👥 Total Users: {total_users}\n"
-            f"💾 Storage Used: {convert_size(storage_size)}\n"
-            f"📂 Data Size: {convert_size(data_size)}\n"
-            f"🔄 Last Updated: {get_utc_now().strftime('%Y-%m-%d %H:%M:%S %Z')}"
-        )
-        
-        await update.message.reply_text(stats_message)
-        
-    except Exception as e:
-        logger.error(f"Error getting stats: {e}")
-        await update.message.reply_text("⚠️ Failed to retrieve statistics. Please try again.")
-
-async def create_new_payment(user_id, username, transaction_id, amount, period_num, period_unit, context, message):
-    """Helper function to create a new payment record"""
-    payment_data = {
-        "user_id": user_id,
-        "username": username,
-        "transaction_id": transaction_id,
-        "amount": int(amount),
-        "period_display": f"{period_num} {period_unit}",
-        "status": "pending",
-        "created_at": get_utc_now(),
-        "updated_at": get_utc_now()
-    }
-    
-    try:
-        payment_id = payments_collection.insert_one(payment_data).inserted_id
-        logger.info(f"New payment created: {payment_id} for user {user_id}")
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Approve", callback_data=f"approve_{payment_id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"reject_{payment_id}"),
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        admin_message = (
-            f"📩 New payment request:\n\n"
-            f"👤 User: @{username} (ID: {user_id})\n"
-            f"💳 Transaction ID: {transaction_id}\n"
-            f"💰 Amount: ₹{amount}\n"
-            f"⏳ Period: {period_num} {period_unit}\n\n"
-            f"🆔 Payment ID: {payment_id}"
-        )
-
-        await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=admin_message,
-            reply_markup=reply_markup
-        )
-        await message.reply_text(
-            "✅ Your payment has been submitted for admin approval.\n\n"
-            "You'll receive a notification once it's processed.\n"
-            "You can check status with /mypayments"
-        )
-    except Exception as e:
-        logger.error(f"Error creating payment: {e}")
-        await message.reply_text("⚠️ Failed to process your payment. Please try again.")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages - either payment submissions or screenshots"""
+async def handle_payment_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle initial payment message"""
     message = update.message
-    text = message.text or message.caption or ""
-
-    if message.photo:
-        if LOG_CHANNEL_ID:
-            try:
-                await context.bot.send_photo(
-                    chat_id=LOG_CHANNEL_ID,
-                    photo=message.photo[-1].file_id,
-                    caption=f"Screenshot from @{message.from_user.username}"
-                )
-                await message.reply_text("✅ Thank you for sending the screenshot!")
-            except Exception as e:
-                logger.error(f"Error forwarding screenshot: {e}")
-                await message.reply_text("⚠️ Failed to process screenshot. Please try again.")
-        return
-
-    match = PAYMENT_PATTERN.match(text)
+    user_id = message.from_user.id
+    
+    match = PAYMENT_PATTERN.match(message.text)
     if not match:
-        await message.reply_text("❌ Please use the correct payment format. Type /start to see the required format.")
+        await message.reply_text("❌ Invalid format. Please use the correct format shown in /start.")
         return
 
     username, transaction_id, amount, period_num, period_unit = match.groups()[:5]
-    user_id = message.from_user.id
+    
+    if transactions_collection.find_one({"transaction_id": transaction_id}):
+        await message.reply_text("❌ This Transaction ID was already used. Each ID can only be used once.")
+        return
 
     context.user_data['pending_payment'] = {
         'user_id': user_id,
@@ -202,62 +130,85 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'transaction_id': transaction_id,
         'amount': amount,
         'period_num': period_num,
-        'period_unit': period_unit
+        'period_unit': period_unit,
+        'text': message.text
     }
 
-    existing_approved = payments_collection.find_one({
-        "user_id": user_id,
-        "status": "approved"
-    })
+    await message.reply_text("✅ Payment details received. Please now send your payment screenshot as a photo.")
 
-    if existing_approved:
-        keyboard = [
-            [InlineKeyboardButton("✅ Yes, submit new payment", callback_data="confirm_new")],
-            [InlineKeyboardButton("❌ No, keep existing", callback_data="cancel_new")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        status_message = (
-            "⚠️ You already have an active payment:\n\n"
-            f"💳 Transaction ID: {existing_approved['transaction_id']}\n"
-            f"💰 Amount: ₹{existing_approved['amount']}\n"
-            f"⏳ Period: {existing_approved.get('period_display', 'N/A')}\n\n"
-            "Do you want to submit a new payment anyway?"
-        )
-        
-        await message.reply_text(status_message, reply_markup=reply_markup)
-        return
-
-    existing_pending = payments_collection.find_one({
-        "user_id": user_id,
-        "status": "pending"
-    })
+async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle payment screenshot"""
+    message = update.message
+    user_id = message.from_user.id
     
-    if existing_pending:
-        keyboard = [
-            [InlineKeyboardButton("✅ Submit New Payment", callback_data="confirm_replace")],
-            [InlineKeyboardButton("❌ Keep Existing", callback_data="keep_existing")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        status_message = (
-            "⏳ You already have a pending payment:\n\n"
-            f"💳 Transaction ID: {existing_pending['transaction_id']}\n"
-            f"💰 Amount: ₹{existing_pending['amount']}\n"
-            f"⏳ Period: {existing_pending.get('period_display', 'N/A')}\n"
-            f"🕒 Submitted: {existing_pending['created_at'].strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
-            "You can submit a new payment if needed - the previous pending payment will be cancelled."
-        )
-        
-        await message.reply_text(status_message, reply_markup=reply_markup)
+    if 'pending_payment' not in context.user_data:
+        await message.reply_text("❌ Please send payment details first.")
         return
 
-    await create_new_payment(user_id, username, transaction_id, amount, period_num, period_unit, context, message)
+    payment_data = context.user_data['pending_payment']
+    
+    try:
+        transactions_collection.insert_one({
+            "transaction_id": payment_data['transaction_id'],
+            "user_id": user_id,
+            "registered_at": get_utc_now()
+        })
+    except pymongo.errors.DuplicateKeyError:
+        await message.reply_text("❌ This Transaction ID was already used. Please contact support.")
+        return
+
+    days = convert_period_to_days(payment_data['period_num'], payment_data['period_unit'])
+    payment_id = payments_collection.insert_one({
+        "user_id": user_id,
+        "username": payment_data['username'],
+        "transaction_id": payment_data['transaction_id'],
+        "amount": int(payment_data['amount']),
+        "days": days,
+        "period_display": f"{payment_data['period_num']} {payment_data['period_unit']}",
+        "status": "pending",
+        "created_at": get_utc_now()
+    }).inserted_id
+
+    # Send to admin
+    admin_msg = (
+        f"📦 New Payment Submission\n\n"
+        f"👤 User: @{payment_data['username']} (ID: {user_id})\n"
+        f"💳 Transaction ID: {payment_data['transaction_id']}\n"
+        f"💰 Amount: ₹{payment_data['amount']}\n"
+        f"⏳ Period: {payment_data['period_num']} {payment_data['period_unit']}\n\n"
+        f"🆔 Payment ID: {payment_id}"
+    )
+    
+    await context.bot.send_message(ADMIN_CHAT_ID, admin_msg)
+    await context.bot.send_photo(
+        ADMIN_CHAT_ID, 
+        photo=message.photo[-1].file_id,
+        caption=f"Screenshot for {payment_data['transaction_id']}"
+    )
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Approve", callback_data=f"approve_{payment_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"reject_{payment_id}"),
+        ]
+    ]
+    await context.bot.send_message(
+        ADMIN_CHAT_ID,
+        "Please review this payment:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+    await message.reply_text(
+        "✅ Your payment has been submitted for admin approval.\n"
+        "You'll be notified when it's processed.\n\n"
+        "Use /mypayments to check status."
+    )
+    del context.user_data['pending_payment']
 
 async def my_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's payment history"""
     user_id = update.message.from_user.id
-    payments = list(payments_collection.find({"user_id": user_id}).sort("created_at", -1))
+    payments = list(payments_collection.find({"user_id": user_id}).sort("created_at", -1).limit(10))
     
     if not payments:
         await update.message.reply_text("📭 You don't have any payment history yet.")
@@ -266,182 +217,191 @@ async def my_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
     messages = []
     for payment in payments:
         status_emoji = "⏳" if payment["status"] == "pending" else "✅" if payment["status"] == "approved" else "❌"
-        period_display = payment.get("period_display", "N/A")
         msg = (
-            f"{status_emoji} {payment['status'].capitalize()} Payment\n"
+            f"{status_emoji} {payment['status'].capitalize()}\n"
             f"💳 ID: {payment['transaction_id']}\n"
             f"💰 Amount: ₹{payment['amount']}\n"
-            f"⏳ Period: {period_display}\n"
+            f"⏳ Period: {payment.get('period_display', 'N/A')}\n"
             f"📅 Date: {payment['created_at'].strftime('%Y-%m-%d %H:%M')}\n"
         )
         messages.append(msg)
     
-    await update.message.reply_text("\n\n".join(messages))
+    await update.message.reply_text("📋 Your Payment History:\n\n" + "\n".join(messages))
 
-async def cancel_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel a user's pending payment"""
-    user_id = update.message.from_user.id
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show admin statistics"""
+    if str(update.message.from_user.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("❌ Admin only command.")
+        return
+    
     try:
-        result = payments_collection.update_one(
-            {"user_id": user_id, "status": "pending"},
-            {"$set": {"status": "cancelled", "updated_at": get_utc_now()}}
+        total_users = users_collection.count_documents({})
+        total_payments = payments_collection.count_documents({})
+        pending_payments = payments_collection.count_documents({"status": "pending"})
+        
+        db_stats = db.command("dbStats")
+        storage_size = db_stats.get("storageSize", 0) / (1024 * 1024)  # Convert to MB
+        
+        stats_msg = (
+            "📊 Admin Statistics\n\n"
+            f"👥 Total Users: {total_users}\n"
+            f"💰 Total Payments: {total_payments}\n"
+            f"⏳ Pending Approvals: {pending_payments}\n"
+            f"💾 Storage Used: {storage_size:.2f} MB\n\n"
+            "🔹 /manage_payments - View pending payments"
         )
         
-        if result.modified_count > 0:
-            await update.message.reply_text("✅ Your pending payment has been cancelled.")
-        else:
-            await update.message.reply_text("ℹ️ You don't have any pending payments to cancel.")
+        await update.message.reply_text(stats_msg)
     except Exception as e:
-        logger.error(f"Error cancelling payment: {e}")
-        await update.message.reply_text("⚠️ Failed to cancel payment. Please try again.")
+        logger.error(f"Error getting stats: {e}")
+        await update.message.reply_text("❌ Error retrieving statistics.")
 
+async def manage_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin payment management interface"""
+    if str(update.message.from_user.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("❌ Admin only command.")
+        return
+    
+    pending_payments = list(payments_collection.find({"status": "pending"}).sort("created_at", -1).limit(10))
+    
+    if not pending_payments:
+        await update.message.reply_text("✅ No pending payments to review.")
+        return
+    
+    for payment in pending_payments:
+        payment_msg = (
+            f"🆔 Payment ID: {payment['_id']}\n"
+            f"👤 User: @{payment['username']} (ID: {payment['user_id']})\n"
+            f"💳 Transaction ID: {payment['transaction_id']}\n"
+            f"💰 Amount: ₹{payment['amount']}\n"
+            f"⏳ Period: {payment.get('period_display', 'N/A')}\n"
+            f"📅 Submitted: {payment['created_at'].strftime('%Y-%m-%d %H:%M')}\n\n"
+            "Use buttons below to approve/reject:"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"approve_{payment['_id']}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"reject_{payment['_id']}"),
+            ]
+        ]
+        
+        await update.message.reply_text(
+            payment_msg,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send broadcast message to all users (admin only)"""
+    if str(update.message.from_user.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("❌ Admin only command.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /broadcast <message>")
+        return
+
+    message = ' '.join(context.args)
+    users = users_collection.find({})
+    total = 0
+    success = 0
+
+    await update.message.reply_text(f"📢 Starting broadcast to {users_collection.count_documents({})} users...")
+
+    for user in users:
+        try:
+            await context.bot.send_message(
+                chat_id=user["user_id"],
+                text=f"📢 Announcement:\n\n{message}"
+            )
+            success += 1
+        except Exception as e:
+            logger.error(f"Failed to send to user {user['user_id']}: {e}")
+        total += 1
+        
+        # Small delay to avoid rate limiting
+        if total % 5 == 0:
+            await asyncio.sleep(1)
+
+    await update.message.reply_text(
+        f"✅ Broadcast completed!\n"
+        f"• Total users: {total}\n"
+        f"• Successful deliveries: {success}\n"
+        f"• Failed: {total - success}"
+        )
 async def handle_callback(update: Update, context: CallbackContext):
     """Handle admin approval/rejection callbacks"""
     query = update.callback_query
     await query.answer()
+    
+    if str(query.from_user.id) != ADMIN_CHAT_ID:
+        await query.edit_message_text("❌ Only admins can perform this action.")
+        return
 
     try:
-        data = query.data
-        if data.startswith(("approve_", "reject_")):
-            action, payment_id = data.split("_")
-            payment_id = ObjectId(payment_id)
+        action, payment_id = query.data.split("_")
+        payment_id = ObjectId(payment_id)
+        
+        payment = payments_collection.find_one({"_id": payment_id})
+        if not payment:
+            await query.edit_message_text("❌ Payment not found!")
+            return
 
-            payment = payments_collection.find_one({"_id": payment_id})
-            if not payment:
-                await query.edit_message_text(text="❌ Payment not found!")
-                return
-
-            current_time = get_utc_now()
-
-            if action == "approve":
-                update_result = payments_collection.update_one(
-                    {"_id": payment_id},
-                    {
-                        "$set": {
-                            "status": "approved",
-                            "updated_at": current_time
-                        }
-                    }
-                )
-
-                if update_result.modified_count > 0:
-                    try:
-                        await context.bot.send_message(
-                            chat_id=payment["user_id"],
-                            text=(
-                                "🎉 Your payment has been approved!\n\n"
-                                f"📱 Username: @{payment['username']}\n"
-                                f"💳 Transaction ID: {payment['transaction_id']}\n"
-                                f"💰 Amount: ₹{payment['amount']}\n"
-                                f"⏳ Period: {payment.get('period_display', 'N/A')}\n\n"
-                                "Thank you for your payment!"
-                            )
-                        )
-                    except Exception as e:
-                        logger.error(f"Error notifying user: {e}")
-
-                    await query.edit_message_text(
-                        text=f"✅ Approved payment:\n\n{query.message.text}",
-                        reply_markup=None
-                    )
-
-                    if LOG_CHANNEL_ID:
-                        try:
-                            await context.bot.send_message(
-                                chat_id=LOG_CHANNEL_ID,
-                                text=(
-                                    "💰 Payment Approved\n\n"
-                                    f"👤 User: @{payment['username']}\n"
-                                    f"💳 Transaction ID: {payment['transaction_id']}\n"
-                                    f"💰 Amount: ₹{payment['amount']}\n"
-                                    f"⏳ Period: {payment.get('period_display', 'N/A')}"
-                                )
-                            )
-                        except Exception as e:
-                            logger.error(f"Error logging to channel: {e}")
-
-            elif action == "reject":
-                update_result = payments_collection.update_one(
-                    {"_id": payment_id},
-                    {"$set": {"status": "rejected", "updated_at": current_time}}
-                )
-
-                if update_result.modified_count > 0:
-                    try:
-                        await context.bot.send_message(
-                            chat_id=payment["user_id"],
-                            text=(
-                                "❌ Your payment has been rejected.\n\n"
-                                f"Transaction ID: {payment['transaction_id']}\n"
-                                f"Amount: ₹{payment['amount']}\n\n"
-                                "Please contact support if you believe this is an error."
-                            )
-                        )
-                    except Exception as e:
-                        logger.error(f"Error notifying user: {e}")
-
-                    await query.edit_message_text(
-                        text=f"❌ Rejected payment:\n\n{query.message.text}",
-                        reply_markup=None
-                    )
-
-    except ValueError as e:
-        logger.error(f"Error processing callback: {e}")
-        await query.edit_message_text(text="❌ Error processing request. Invalid data format.")
+        if action == "approve":
+            payments_collection.update_one(
+                {"_id": payment_id},
+                {"$set": {"status": "approved", "updated_at": get_utc_now()}}
+            )
+            
+            await context.bot.send_message(
+                payment["user_id"],
+                "🎉 Your payment has been approved!\n\n"
+                f"💳 Transaction ID: {payment['transaction_id']}\n"
+                f"💰 Amount: ₹{payment['amount']}\n"
+                f"⏳ Period: {payment.get('period_display', 'N/A')}\n\n"
+                "Thank you for your payment!"
+            )
+            
+            await query.edit_message_text(
+                f"✅ Approved payment:\n\n{query.message.text}",
+                reply_markup=None
+            )
+            
+        elif action == "reject":
+            payments_collection.update_one(
+                {"_id": payment_id},
+                {"$set": {"status": "rejected", "updated_at": get_utc_now()}}
+            )
+            
+            await context.bot.send_message(
+                payment["user_id"],
+                "❌ Your payment was rejected.\n\n"
+                f"Transaction ID: {payment['transaction_id']}\n"
+                f"Amount: ₹{payment['amount']}\n\n"
+                "Please contact support if you believe this was an error."
+            )
+            
+            await query.edit_message_text(
+                f"❌ Rejected payment:\n\n{query.message.text}",
+                reply_markup=None
+            )
+            
     except Exception as e:
-        logger.error(f"Unexpected error in callback: {e}")
-        await query.edit_message_text(text="❌ An unexpected error occurred. Please try again.")
-
-async def handle_payment_decision(update: Update, context: CallbackContext):
-    """Handle user's decision about new payment submission"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_data = context.user_data.get('pending_payment')
-    if not user_data:
-        await query.edit_message_text(text="⚠️ Payment data not found. Please start over.")
-        return
-    
-    user_id = user_data['user_id']
-    username = user_data['username']
-    transaction_id = user_data['transaction_id']
-    amount = user_data['amount']
-    period_num = user_data['period_num']
-    period_unit = user_data['period_unit']
-    
-    if query.data == "confirm_new":
-        await create_new_payment(user_id, username, transaction_id, amount, period_num, period_unit, context, query.message)
-        await query.edit_message_text(text="✅ New payment submitted alongside your existing active payment!")
-    
-    elif query.data == "cancel_new":
-        await query.edit_message_text(text="❌ New payment submission cancelled.")
-    
-    elif query.data == "confirm_replace":
-        payments_collection.update_one(
-            {"user_id": user_id, "status": "pending"},
-            {"$set": {"status": "cancelled", "updated_at": get_utc_now()}}
-        )
-        await create_new_payment(user_id, username, transaction_id, amount, period_num, period_unit, context, query.message)
-        await query.edit_message_text(text="✅ New payment submitted (previous pending payment cancelled)!")
-    
-    elif query.data == "keep_existing":
-        await query.edit_message_text(text="ℹ️ Keeping your existing pending payment.")
-    
-    if 'pending_payment' in context.user_data:
-        del context.user_data['pending_payment']
+        logger.error(f"Error in callback: {e}")
+        await query.edit_message_text("❌ Error processing request.")
 
 def main():
     """Start the bot"""
     application = Application.builder().token(BOT_TOKEN).build()
 
+    # Add handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("stats", stats))
     application.add_handler(CommandHandler("mypayments", my_payments))
-    application.add_handler(CommandHandler("cancel", cancel_payment))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_message))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("manage_payments", manage_payments))
+    application.add_handler(CommandHandler("broadcast", broadcast))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_payment_message))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_screenshot))
     application.add_handler(CallbackQueryHandler(handle_callback, pattern="^(approve|reject)_"))
-    application.add_handler(CallbackQueryHandler(handle_payment_decision, pattern="^(confirm_new|cancel_new|confirm_replace|keep_existing)$"))
     
     logger.info("Bot is starting...")
     application.run_polling()
