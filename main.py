@@ -195,7 +195,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 5. Store payment data
             context.user_data['payment'] = {
                 'username': username,
-                'txn_id': txn_id,
+                'txn_id': transaction_id,
                 'amount': amount,
                 'period': period,
                 'period_display': period_display,
