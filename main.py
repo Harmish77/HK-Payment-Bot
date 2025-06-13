@@ -99,12 +99,12 @@ user_logs_collection = db["user_logs"]
 message_logs_collection = db["message_logs"]
 
 PAYMENT_PATTERN = re.compile(
-    r"✅ I have successfully completed the payment.\s*"
-    r"📱 Telegram Username: @([^\s]+)\s*"
-    r"💳 Transaction ID: (\d+)\s*"
-    r"💰 Amount Paid: ₹(\d+)\s*"
-    r"⏳ Time Period: (\d+)\s*(day|days|month|months|year)\s*"
-    r"🙏 Thank you!",
+    r"✅ Payment Form Submission\s*"
+    r"👤 Username: @?([^\s]+)\s*"
+    r"💳 TXN ID: (\d{12})\s*"
+    r"💰 Amount: ₹(\d+)\s*"
+    r"⏳ Period: (.+?)\s*"
+    r"(📸 Please send your payment screenshot)?",
     re.IGNORECASE
 )
 
@@ -166,36 +166,59 @@ async def register_new_user(user_id: int, username: str) -> bool:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await register_new_user(user.id, user.username)
     
-    await send_log_to_channel(
-        f"👤 <b>New User Started Bot</b>\n"
-        f"🆔 {user.id}\n"
-        f"👁 @{user.username}\n"
-        f"📛 {user.full_name}",
-        bot=context.bot
-    )
+    if context.args:
+        # Handle web form submission
+        payment_text = ' '.join(context.args)
+        match = PAYMENT_PATTERN.match(payment_text)
+        
+        if match:
+            username, txn_id, amount, period = match.groups()
+            
+            # Check for duplicate transaction
+            if transactions_collection.find_one({"transaction_id": txn_id}):
+                await update.message.reply_text(
+                    "⚠️ This transaction was already submitted.\n"
+                    "Please contact support if this is an error."
+                )
+                return
+                
+            # Store in context
+            context.user_data['pending_payment'] = {
+                'username': username,
+                'transaction_id': txn_id,
+                'amount': amount,
+                'period': period,
+                'source': 'web_form'
+            }
+            
+            await update.message.reply_text(
+                "📋 Payment Details Received:\n\n"
+                f"👤 Username: @{username}\n"
+                f"💳 TXN ID: {txn_id}\n"
+                f"💰 Amount: ₹{amount}\n"
+                f"⏳ Period: {period}\n\n"
+                "📸 Please send your payment screenshot now to complete verification.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return
     
-    await log_user_action(
-        user_id=user.id,
-        action="command",
-        details={"command": "start"}
-    )
+    # Normal start command for users coming directly to bot
+    is_new = await register_new_user(user.id, user.username)
+    if is_new:
+        await send_log_to_channel(
+            f"👤 <b>New User</b>\n"
+            f"ID: {user.id}\n"
+            f"Username: @{user.username}",
+            bot=context.bot
+        )
     
     await update.message.reply_text(
-        "Welcome to the Payment Bot! 💰\n\n"
-        "📝 To submit a payment:\n"
-        "1. Send payment details in this format:\n\n"
-        "✅ I have successfully completed the payment.\n"
-        "📱 Telegram Username: @your_username\n"
-        "💳 Transaction ID: 123456789\n"
-        "💰 Amount Paid: ₹100\n"
-        "⏳ Time Period: 30 days\n"
-        "🙏 Thank you!\n\n"
-        "2. Then send your payment screenshot\n\n"
-        "🔹 Commands:\n"
-        "/mypayments - View your payment history\n"
-        "/help - Show instructions"
+        "Welcome to MovieHub Premium!\n\n"
+        "To subscribe, please visit our payment form:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Open Payment Form", url="https://harmish77.github.io/HK_payment_V0/")]
+        ])
     )
 
 async def handle_payment_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -237,86 +260,63 @@ async def handle_payment_message(update: Update, context: ContextTypes.DEFAULT_T
 
     await update.message.reply_text("✅ Payment details received. Please now send your payment screenshot as a photo.")
 
+
 async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle payment screenshot submission"""
-    user = update.message.from_user
+    user = update.effective_user
     
     if 'pending_payment' not in context.user_data:
-        await update.message.reply_text("❌ Please send payment details first.")
+        await update.message.reply_text(
+            "Please submit payment details first via our website:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Payment Form", url="https://harmish77.github.io/HK_payment_V0/")]
+            ])
+        )
         return
-
+        
     payment_data = context.user_data['pending_payment']
     
-    try:
-        transactions_collection.insert_one({
-            "transaction_id": payment_data['transaction_id'],
-            "user_id": user.id,
-            "registered_at": get_utc_now()
-        })
-    except pymongo.errors.DuplicateKeyError:
-        await update.message.reply_text("❌ This Transaction ID was already used. Please contact support.")
+    # Additional validation
+    if not update.message.photo:
+        await update.message.reply_text("Please send the screenshot as a photo (not file).")
         return
-
-    days = convert_period_to_days(payment_data['period_num'], payment_data['period_unit'])
+        
+    # Save to database with source marker
     payment_id = payments_collection.insert_one({
         "user_id": user.id,
         "username": payment_data['username'],
         "transaction_id": payment_data['transaction_id'],
         "amount": int(payment_data['amount']),
-        "days": days,
-        "period_display": f"{payment_data['period_num']} {payment_data['period_unit']}",
+        "period": payment_data['period'],
         "status": "pending",
+        "source": "web_form",
         "created_at": get_utc_now(),
         "screenshot_id": update.message.photo[-1].file_id
     }).inserted_id
-    # Send to log channel
-    await send_log_to_channel(
-        f"💰 <b>New Payment Submission</b>\n"
-        f"👤 @{payment_data['username']} (ID: {user.id})\n"
-        f"💳 TXN: {payment_data['transaction_id']}\n"
-        f"💵 ₹{payment_data['amount']}",
-        bot=context.bot,
-        photo=update.message.photo[-1].file_id
-    )
-    # Send to admin
-    admin_msg = (
-        f"📦 New Payment Submission\n\n"
-        f"👤 User: @{payment_data['username']} (ID: {user.id})\n"
-        f"💳 Transaction ID: {payment_data['transaction_id']}\n"
-        f"💰 Amount: ₹{payment_data['amount']}\n"
-        f"⏳ Period: {payment_data['period_num']} {payment_data['period_unit']}\n\n"
-        f"🆔 Payment ID: {payment_id}"
-    )
     
-    await context.bot.send_message(ADMIN_CHAT_ID, admin_msg)
+    # Notify admin with special web form marker
     await context.bot.send_photo(
-        ADMIN_CHAT_ID, 
+        chat_id=ADMIN_CHAT_ID,
         photo=update.message.photo[-1].file_id,
-        caption=f"Screenshot for {payment_data['transaction_id']}"
+        caption=(
+            f"🌐 <b>Web Form Payment</b>\n\n"
+            f"👤 User: @{payment_data['username']} (ID: {user.id})\n"
+            f"💳 TXN: {payment_data['transaction_id']}\n"
+            f"💰 ₹{payment_data['amount']} for {payment_data['period']}\n"
+            f"🆔 Payment ID: {payment_id}"
+        ),
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"approve_{payment_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"reject_{payment_id}")
+            ]
+        ]),
+        parse_mode="HTML"
     )
     
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Approve", callback_data=f"approve_{payment_id}"),
-            InlineKeyboardButton("❌ Reject", callback_data=f"reject_{payment_id}"),
-        ]
-    ]
-    await context.bot.send_message(
-        ADMIN_CHAT_ID,
-        "Please review this payment:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
     await update.message.reply_text(
-        "✅ Your payment has been submitted for admin approval.\n"
-        "You'll be notified when it's processed.\n\n"
-        "Use /mypayments to check status."
-    )
-    
-    await log_user_action(
-        user_id=user.id,
-        action="payment_complete",
-        details={"payment_id": str(payment_id)}
+        "✅ Verification submitted!\n\n"
+        "Your payment is now pending admin approval.\n"
+        "You'll receive a notification when processed."
     )
     
     del context.user_data['pending_payment']
@@ -435,18 +435,13 @@ async def manage_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
+
 async def handle_callback(update: Update, context: CallbackContext):
-    """Handle admin callbacks for payment approval/rejection"""
     query = update.callback_query
     await query.answer()
     
     try:
-        # Safely extract action and payment_id
-        if not query.data or '_' not in query.data:
-            await query.edit_message_text("❌ Invalid callback data")
-            return
-            
-        action, payment_id = query.data.split('_', 1)
+        action, payment_id = query.data.split('_')
         payment_id = ObjectId(payment_id)
         
         if str(query.from_user.id) != ADMIN_CHAT_ID:
@@ -462,7 +457,11 @@ async def handle_callback(update: Update, context: CallbackContext):
             # Update payment status
             payments_collection.update_one(
                 {"_id": payment_id},
-                {"$set": {"status": "approved", "updated_at": get_utc_now()}}
+                {"$set": {
+                    "status": "approved", 
+                    "approved_at": get_utc_now(),
+                    "approved_by": query.from_user.username
+                }}
             )
             
             # Notify user
@@ -470,7 +469,9 @@ async def handle_callback(update: Update, context: CallbackContext):
                 payment["user_id"],
                 "🎉 Your payment has been approved!\n\n"
                 f"💳 Transaction ID: {payment['transaction_id']}\n"
-                f"💰 Amount: ₹{payment['amount']}"
+                f"💰 Amount: ₹{payment['amount']}\n"
+                f"⏳ Period: {payment['period']}\n\n"
+                "You now have premium access!"
             )
             
             # Log to channel
@@ -478,12 +479,13 @@ async def handle_callback(update: Update, context: CallbackContext):
                 f"✅ <b>Payment Approved</b>\n"
                 f"👤 User: @{payment['username']}\n"
                 f"💳 TXN: {payment['transaction_id']}\n"
+                f"💰 ₹{payment['amount']}\n"
                 f"👨‍💻 Admin: @{query.from_user.username}",
                 bot=context.bot
             )
             
             await query.edit_message_text(
-                f"✅ Approved payment: {payment['transaction_id']}",
+                f"✅ Approved payment {payment['transaction_id']}",
                 reply_markup=None
             )
 
@@ -491,15 +493,19 @@ async def handle_callback(update: Update, context: CallbackContext):
             # Update payment status
             payments_collection.update_one(
                 {"_id": payment_id},
-                {"$set": {"status": "rejected", "updated_at": get_utc_now()}}
+                {"$set": {
+                    "status": "rejected",
+                    "rejected_at": get_utc_now(),
+                    "rejected_by": query.from_user.username
+                }}
             )
             
             # Notify user
             await context.bot.send_message(
                 payment["user_id"],
                 "❌ Your payment was rejected.\n\n"
-                f"Transaction ID: {payment['transaction_id']}\n"
-                "Please contact support if this was an error."
+                f"Transaction ID: {payment['transaction_id']}\n\n"
+                "Please contact support if you believe this was an error."
             )
             
             # Log to channel
@@ -512,12 +518,9 @@ async def handle_callback(update: Update, context: CallbackContext):
             )
             
             await query.edit_message_text(
-                f"❌ Rejected payment: {payment['transaction_id']}",
+                f"❌ Rejected payment {payment['transaction_id']}",
                 reply_markup=None
             )
-            
-        else:
-            await query.edit_message_text("❌ Unknown action")
             
     except Exception as e:
         logger.error(f"Callback error: {e}")
@@ -594,6 +597,20 @@ async def admin_wipe_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+async def web_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Guide web users through payment process"""
+    await update.message.reply_text(
+        "To make a payment:\n\n"
+        "1. Visit our payment website\n"
+        "2. Complete the payment form\n"
+        "3. You'll be redirected to this bot automatically\n"
+        "4. Send your payment screenshot when prompted\n\n"
+        "Start now:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Open Payment Form", url="https://harmish77.github.io/HK_payment_V0/")]
+        ])
+    )
+    
 async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Restart the bot (admin only)"""
     if str(update.message.from_user.id) != ADMIN_CHAT_ID:
@@ -757,6 +774,7 @@ async def main():
     application.add_handler(CommandHandler("restart", restart_bot))
     application.add_handler(CommandHandler("view_logs", view_logs))
     application.add_handler(CommandHandler("user_logs", get_user_logs))
+    application.add_handler(CommandHandler("payment", web_payment))
     application.add_error_handler(error_handler)
     
     # Message handlers
