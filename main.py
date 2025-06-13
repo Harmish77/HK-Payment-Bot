@@ -49,15 +49,6 @@ MONGODB_URI = os.getenv("MONGODB_URI")
 if not all([BOT_TOKEN, ADMIN_CHAT_ID, MONGODB_URI]):
     raise ValueError("Missing required environment variables")
 
-PAYMENT_PATTERN = re.compile(
-    r"✅ I have successfully completed the payment.\s*"
-    r"📱 Telegram Username: @([^\s]+)\s*"
-    r"💳 Transaction ID: (\d+)\s*"
-    r"💰 Amount Paid: ₹(\d+)\s*"
-    r"⏳ Time Period: (\d+)\s*(day|days|month|months|year)\s*"
-    r"🙏 Thank you!",
-    re.IGNORECASE
-)
 # MongoDB setup
 client = pymongo.MongoClient(MONGODB_URI)
 db = client["payment_bot"]
@@ -67,6 +58,15 @@ users_collection = db["users"]
 user_logs_collection = db["user_logs"]
 message_logs_collection = db["message_logs"]
 
+PAYMENT_PATTERN = re.compile(
+    r"✅ I have successfully completed the payment.\s*"
+    r"📱 Telegram Username: @([^\s]+)\s*"
+    r"💳 Transaction ID: (\d+)\s*"
+    r"💰 Amount Paid: ₹(\d+)\s*"
+    r"⏳ Time Period: (\d+)\s*(day|days|month|months|year)\s*"
+    r"🙏 Thank you!",
+    re.IGNORECASE
+)
 # Create indexes
 payments_collection.create_index([("user_id", 1)])
 payments_collection.create_index([("status", 1)])
@@ -151,9 +151,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help - Show instructions"
     )
 
-
-
-async def handle_screenshot(update: Update, contexasync def handle_payment_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_payment_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle payment message submission"""
     user = update.message.from_user
     await log_user_action(
@@ -186,7 +184,9 @@ async def handle_screenshot(update: Update, contexasync def handle_payment_messa
         'text': update.message.text
     }
 
-    await update.message.reply_text("✅ Payment details received. Please now send your payment screenshot as a photo.")t: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Payment details received. Please now send your payment screenshot as a photo.")
+
+async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle payment screenshot submission"""
     user = update.message.from_user
     
