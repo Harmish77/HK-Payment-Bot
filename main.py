@@ -50,7 +50,8 @@ PORT = int(os.getenv("PORT", 8080))
 
 # Validate environment variables
 if not all([BOT_TOKEN, ADMIN_CHAT_ID, MONGODB_URI]):
-    raise ValueError("Missing required environment variables")
+    logger.error("Missing required environment variables")
+    sys.exit(1)
 
 # MongoDB setup
 client = pymongo.MongoClient(MONGODB_URI)
@@ -610,28 +611,12 @@ async def handle_admin_callbacks(update: Update, context: CallbackContext):
     elif query.data == "cancel_wipe":
         await query.edit_message_text("❌ Data wipe cancelled.")
 
-# HTTP Server Setup
 async def health_check(request):
     """Health check endpoint for Koyeb"""
     return web.Response(text="OK")
 
-def setup_http_server():
-    """Set up the HTTP server for health checks"""
-    app = web.Application()
-    app.router.add_get('/healthz', health_check)
-    return app
-
-async def start_http_server():
-    """Start the HTTP server on the specified port"""
-    app = setup_http_server()
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"HTTP server started on port {PORT}")
-
-async def setup_bot_application():
-    """Setup and return the Telegram bot application"""
+async def setup_bot():
+    """Setup the Telegram bot application"""
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Add handlers
@@ -655,29 +640,31 @@ async def setup_bot_application():
     
     return application
 
-async def main_async():
-    """Async main function that runs both HTTP server and Telegram bot"""
-    # Start HTTP server for health checks
-    http_server_task = asyncio.create_task(start_http_server())
-    
-    # Setup and run Telegram bot
-    application = await setup_bot_application()
-    bot_task = asyncio.create_task(application.run_polling())
-    
-    logger.info("Bot is starting with all features...")
-    
-    # Run both tasks concurrently
-    await asyncio.gather(http_server_task, bot_task)
+async def start_http_server():
+    """Start the HTTP server for health checks"""
+    app = web.Application()
+    app.router.add_get('/healthz', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"HTTP server started on port {PORT}")
+    return site
 
-def main():
-    """Entry point for the application"""
+async def main():
+    """Main async function to run both HTTP server and Telegram bot"""
+    # Setup both services
+    bot = await setup_bot()
+    http_server = await start_http_server()
+    
+    # Run the bot
+    await bot.run_polling()
+
+if __name__ == "__main__":
     try:
-        asyncio.run(main_async())
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot shutting down...")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         sys.exit(1)
-
-if __name__ == "__main__":
-    main()
