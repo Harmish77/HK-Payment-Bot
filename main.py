@@ -4,7 +4,7 @@ import sys
 import logging
 import asyncio
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 import pymongo
 from bson import ObjectId
@@ -14,6 +14,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaPhoto,
+    Bot
 )
 from telegram.ext import (
     Application,
@@ -24,6 +25,7 @@ from telegram.ext import (
     ContextTypes,
     CallbackContext,
 )
+from aiohttp import web
 
 # Configure logging
 logging.basicConfig(
@@ -44,6 +46,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID")
 MONGODB_URI = os.getenv("MONGODB_URI")
+PORT = int(os.getenv("PORT", 8080))
 
 # Validate environment variables
 if not all([BOT_TOKEN, ADMIN_CHAT_ID, MONGODB_URI]):
@@ -67,6 +70,7 @@ PAYMENT_PATTERN = re.compile(
     r"🙏 Thank you!",
     re.IGNORECASE
 )
+
 # Create indexes
 payments_collection.create_index([("user_id", 1)])
 payments_collection.create_index([("status", 1)])
@@ -80,7 +84,7 @@ def get_utc_now():
     """Get current time in UTC with timezone awareness"""
     return datetime.now(timezone.utc)
 
-def convert_period_to_days(period_num, period_unit):
+def convert_period_to_days(period_num: str, period_unit: str) -> int:
     """Convert time period to days"""
     period_unit = period_unit.lower()
     if period_unit in ['day', 'days']:
@@ -160,8 +164,6 @@ async def handle_payment_message(update: Update, context: ContextTypes.DEFAULT_T
         details={"message": update.message.text}
     )
     
-    # Make sure we reference the global PAYMENT_PATTERN
-    global PAYMENT_PATTERN
     match = PAYMENT_PATTERN.match(update.message.text)
     
     if not match:
@@ -301,6 +303,8 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_users = users_collection.count_documents({})
         total_payments = payments_collection.count_documents({})
         pending_payments = payments_collection.count_documents({"status": "pending"})
+        approved_payments = payments_collection.count_documents({"status": "approved"})
+        rejected_payments = payments_collection.count_documents({"status": "rejected"})
         
         db_stats = db.command("dbStats")
         storage_size = db_stats.get("storageSize", 0) / (1024 * 1024)  # Convert to MB
@@ -309,10 +313,13 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📊 Admin Statistics\n\n"
             f"👥 Total Users: {total_users}\n"
             f"💰 Total Payments: {total_payments}\n"
-            f"⏳ Pending Approvals: {pending_payments}\n"
+            f"✅ Approved: {approved_payments}\n"
+            f"⏳ Pending: {pending_payments}\n"
+            f"❌ Rejected: {rejected_payments}\n"
             f"💾 Storage Used: {storage_size:.2f} MB\n\n"
             "🔹 /manage_payments - View pending payments\n"
-            "🔹 /user_logs <user_id> - View user activity"
+            "🔹 /user_logs <user_id> - View user activity\n"
+            "🔹 /broadcast - Send message to all users"
         )
         
         await update.message.reply_text(stats_msg)
@@ -603,8 +610,28 @@ async def handle_admin_callbacks(update: Update, context: CallbackContext):
     elif query.data == "cancel_wipe":
         await query.edit_message_text("❌ Data wipe cancelled.")
 
-def main():
-    """Start the bot with all handlers"""
+# HTTP Server Setup
+async def health_check(request):
+    """Health check endpoint for Koyeb"""
+    return web.Response(text="OK")
+
+def setup_http_server():
+    """Set up the HTTP server for health checks"""
+    app = web.Application()
+    app.router.add_get('/healthz', health_check)
+    return app
+
+async def start_http_server():
+    """Start the HTTP server on the specified port"""
+    app = setup_http_server()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"HTTP server started on port {PORT}")
+
+async def setup_bot_application():
+    """Setup and return the Telegram bot application"""
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Add handlers
@@ -626,8 +653,31 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_callback, pattern="^(approve|reject)_"))
     application.add_handler(CallbackQueryHandler(handle_admin_callbacks, pattern="^(confirm_wipe|cancel_wipe)$"))
     
+    return application
+
+async def main_async():
+    """Async main function that runs both HTTP server and Telegram bot"""
+    # Start HTTP server for health checks
+    http_server_task = asyncio.create_task(start_http_server())
+    
+    # Setup and run Telegram bot
+    application = await setup_bot_application()
+    bot_task = asyncio.create_task(application.run_polling())
+    
     logger.info("Bot is starting with all features...")
-    application.run_polling()
+    
+    # Run both tasks concurrently
+    await asyncio.gather(http_server_task, bot_task)
+
+def main():
+    """Entry point for the application"""
+    try:
+        asyncio.run(main_async())
+    except KeyboardInterrupt:
+        logger.info("Bot shutting down...")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
