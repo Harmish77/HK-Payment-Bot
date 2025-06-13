@@ -28,40 +28,41 @@ from telegram.ext import (
     CallbackContext,
 )
 from aiohttp import web
-
 async def send_log_to_channel(message: str, bot: Bot = None, photo: str = None):
     """Send logs to the designated log channel"""
     if not LOG_CHANNEL_ID:
         return
         
     try:
-        # Create new bot instance if none provided
+        # Use existing bot if available, otherwise create temporary one
         close_bot = False
         if not bot:
             bot = Bot(token=BOT_TOKEN)
             close_bot = True
             
-        if photo:
-            await bot.send_photo(
-                chat_id=LOG_CHANNEL_ID,
-                photo=photo,
-                caption=message[:1000],
-                parse_mode="HTML"
-            )
-        else:
-            await bot.send_message(
-                chat_id=LOG_CHANNEL_ID,
-                text=message[:4000],
-                parse_mode="HTML"
-            )
-            
-        if close_bot:
-            await bot.close()
+        try:
+            if photo:
+                await bot.send_photo(
+                    chat_id=LOG_CHANNEL_ID,
+                    photo=photo,
+                    caption=message[:1000],
+                    parse_mode="HTML"
+                )
+            else:
+                await bot.send_message(
+                    chat_id=LOG_CHANNEL_ID,
+                    text=message[:4000],
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            logger.error(f"Failed to send log to channel: {e}")
+        finally:
+            if close_bot:
+                await asyncio.sleep(1)  # Rate limiting
+                await bot.close()
+                
     except Exception as e:
-        logger.error(f"Failed to send log to channel: {e}")
-        if 'bot' in locals() and close_bot:
-            await bot.close()
-
+        logger.error(f"Logging system error: {e}")
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -772,78 +773,83 @@ async def main():
     http_runner = await start_http_server()
     
     try:
-        # Send startup log using a new bot instance
-        startup_bot = Bot(token=BOT_TOKEN)
+        # Send startup log with delay
+        await asyncio.sleep(2)  # Initial delay to avoid flood
         await send_log_to_channel(
             f"🟢 <b>Bot Starting</b>\n"
             f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-            bot=startup_bot
+            bot=application.bot
         )
-        await startup_bot.close()
 
         # Initialize with clean update state
-        await application.bot.delete_webhook(drop_pending_updates=True)
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(
+            poll_interval=3.0,  # Increased interval
+            timeout=30,
+            drop_pending_updates=True
+        )
         
-        # Create a separate task for the polling
-        polling_task = asyncio.create_task(application.run_polling())
+        logger.info("Bot is now running")
         
         # Keep the application running
         while True:
-            await asyncio.sleep(1)
+            await asyncio.sleep(3600)  # Sleep for 1 hour
             
     except asyncio.CancelledError:
         logger.info("Received shutdown signal")
     except Exception as e:
         logger.error(f"Bot error: {e}")
-        # Send error log using a new bot instance
-        error_bot = Bot(token=BOT_TOKEN)
         await send_log_to_channel(
             f"🔴 <b>Bot Error</b>\n"
             f"⚠️ {type(e).__name__}\n"
             f"📝 {str(e)[:300]}",
-            bot=error_bot
+            bot=application.bot
         )
-        await error_bot.close()
     finally:
         logger.info("Shutting down...")
-        # Send shutdown log using a new bot instance
-        shutdown_bot = Bot(token=BOT_TOKEN)
-        await send_log_to_channel(
-            f"🛑 <b>Bot Stopping</b>\n"
-            f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-            bot=shutdown_bot
-        )
-        await shutdown_bot.close()
-        
+        try:
+            await send_log_to_channel(
+                f"🛑 <b>Bot Stopping</b>\n"
+                f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+                bot=application.bot
+            )
+        except:
+            pass
+            
         # Cleanup application if it was started
-        if 'application' in locals() and application.running:
-            await application.stop()
-            await application.shutdown()
+        if 'application' in locals():
+            try:
+                if application.running:
+                    await application.updater.stop()
+                    await application.stop()
+                    await application.shutdown()
+            except:
+                pass
         
         # Cleanup HTTP server
         await http_runner.cleanup()
         logger.info("Bot stopped")
 if __name__ == "__main__":
+    # Configure asyncio policy for Koyeb
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
     # Create and set event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     try:
         # Run main until complete
-        main_task = loop.create_task(main())
-        
-        # Handle keyboard interrupt
-        def shutdown():
-            main_task.cancel()
-            
-        loop.add_signal_handler(signal.SIGINT, shutdown)
-        loop.add_signal_handler(signal.SIGTERM, shutdown)
-        
-        loop.run_until_complete(main_task)
-        
+        loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("Bot shutting down...")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
     finally:
+        # Give time for cleanup
+        tasks = asyncio.all_tasks(loop=loop)
+        for task in tasks:
+            task.cancel()
+        loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
         loop.close()
