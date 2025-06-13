@@ -166,60 +166,75 @@ async def register_new_user(user_id: int, username: str) -> bool:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    await register_new_user(user.id, user.username)  # Always register user
     
-    if context.args:
-        # Handle web form submission
-        payment_text = ' '.join(context.args)
-        match = PAYMENT_PATTERN.match(payment_text)
-        
-        if match:
-            username, txn_id, amount, period = match.groups()
+    # Handle web form redirects
+    if context.args and context.args[0].startswith('web_'):
+        try:
+            # Decode the payment data
+            payment_data = json.loads(urllib.parse.unquote(context.args[0][4:]))
             
-            # Check for duplicate transaction
-            if transactions_collection.find_one({"transaction_id": txn_id}):
-                await update.message.reply_text(
-                    "⚠️ This transaction was already submitted.\n"
-                    "Please contact support if this is an error."
-                )
-                return
-                
-            # Store in context
+            # Validate required fields
+            required_fields = ['u', 't', 'a', 'p']
+            if not all(field in payment_data for field in required_fields):
+                raise ValueError("Missing required payment fields")
+            
+            # Store in context for screenshot handling
             context.user_data['pending_payment'] = {
-                'username': username,
-                'transaction_id': txn_id,
-                'amount': amount,
-                'period': period,
+                'username': payment_data['u'],
+                'transaction_id': payment_data['t'],
+                'amount': payment_data['a'],
+                'period': payment_data['p'],
                 'source': 'web_form'
             }
             
+            # Send confirmation message
             await update.message.reply_text(
-                "📋 Payment Details Received:\n\n"
-                f"👤 Username: @{username}\n"
-                f"💳 TXN ID: {txn_id}\n"
-                f"💰 Amount: ₹{amount}\n"
-                f"⏳ Period: {period}\n\n"
+                "📋 Payment Details Received from Web Form:\n\n"
+                f"👤 Username: @{payment_data['u']}\n"
+                f"💳 TXN ID: {payment_data['t']}\n"
+                f"💰 Amount: ₹{payment_data['a']}\n"
+                f"⏳ Period: {payment_data['p']}\n\n"
                 "📸 Please send your payment screenshot now to complete verification.",
                 reply_markup=ReplyKeyboardRemove()
             )
+            
+            # Log successful redirect
+            await send_log_to_channel(
+                f"🌐 Web Form Redirect Success\n"
+                f"👤 @{payment_data['u']}\n"
+                f"💳 {payment_data['t']}\n"
+                f"💰 ₹{payment_data['a']}",
+                bot=context.bot
+            )
+            return
+            
+        except Exception as e:
+            logger.error(f"Web form redirect error: {str(e)}")
+            await update.message.reply_text(
+                "⚠️ Couldn't process your payment details.\n"
+                "Please send:\n"
+                "1. Your payment screenshot\n"
+                "2. Transaction ID\n"
+                "3. Amount paid\n\n"
+                "We'll process it manually."
+            )
+            await send_log_to_channel(
+                f"🔴 Web Form Redirect Failed\n"
+                f"User: @{user.username if user else 'unknown'}\n"
+                f"Error: {str(e)[:200]}",
+                bot=context.bot
+            )
             return
     
-    # Normal start command for users coming directly to bot
-    is_new = await register_new_user(user.id, user.username)
-    if is_new:
-        await send_log_to_channel(
-            f"👤 <b>New User</b>\n"
-            f"ID: {user.id}\n"
-            f"Username: @{user.username}",
-            bot=context.bot
-        )
-    
+    # Normal start command
     await update.message.reply_text(
         "Welcome to MovieHub Premium!\n\n"
         "To subscribe, please visit our payment form:",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("Open Payment Form", url="https://harmish77.github.io/HK_payment_V0/")]
         ])
-    )
+        )
 
 async def handle_payment_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
