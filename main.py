@@ -145,25 +145,24 @@ async def log_user_action(user_id: int, action: str, details: Dict = None):
     except Exception as e:
         logger.error(f"Failed to log user action: {e}")
 
-async def register_new_user(user_id: int, username: str):
-    """Register a new user and log the event"""
+async def register_new_user(user_id: int, username: str) -> bool:
+    """Register a new user and return True if first-time registration"""
     try:
-        users_collection.update_one(
-            {"user_id": user_id},
-            {"$set": {
-                "username": username,
-                "first_seen": get_utc_now(),
-                "last_seen": get_utc_now()
-            }},
-            upsert=True
-        )
-        await log_user_action(
-            user_id=user_id,
-            action="registration",
-            details={"username": username}
-        )
+        user = users_collection.find_one({"user_id": user_id})
+        
+        if user:
+            return False  # Existing user
+            
+        users_collection.insert_one({
+            "user_id": user_id,
+            "username": username,
+            "first_seen": get_utc_now()
+        })
+        return True
+        
     except Exception as e:
         logger.error(f"Failed to register user {user_id}: {e}")
+        return False
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
