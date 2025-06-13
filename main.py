@@ -3,6 +3,7 @@ import re
 import sys
 import logging
 import asyncio
+import signal
 from datetime import datetime, timezone
 from typing import Dict, Optional, List
 
