@@ -35,7 +35,12 @@ async def send_log_to_channel(message: str, bot: Bot = None, photo: str = None):
         return
         
     try:
-        bot = bot or Bot(token=BOT_TOKEN)
+        # Create new bot instance if none provided
+        close_bot = False
+        if not bot:
+            bot = Bot(token=BOT_TOKEN)
+            close_bot = True
+            
         if photo:
             await bot.send_photo(
                 chat_id=LOG_CHANNEL_ID,
@@ -49,8 +54,13 @@ async def send_log_to_channel(message: str, bot: Bot = None, photo: str = None):
                 text=message[:4000],
                 parse_mode="HTML"
             )
+            
+        if close_bot:
+            await bot.close()
     except Exception as e:
         logger.error(f"Failed to send log to channel: {e}")
+        if 'bot' in locals() and close_bot:
+            await bot.close()
 
 # Configure logging
 logging.basicConfig(
@@ -732,19 +742,10 @@ async def start_http_server():
     logger.info(f"HTTP server running on port {PORT}")
     return runner  # Important for proper cleanup
 
-
-
 async def main():
     """Main entry point for the application"""
-    # Initialize bot first
+    # Initialize bot
     application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Now we can send startup log (using standalone bot instance)
-    await send_log_to_channel(
-        f"🟢 <b>Bot Started</b>\n"
-        f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-        bot=application.bot
-    )
     
     # Add all handlers
     application.add_handler(CommandHandler("start", start))
@@ -765,45 +766,84 @@ async def main():
     # Callback handlers
     application.add_handler(CallbackQueryHandler(handle_callback, pattern="^(approve|reject)_"))
     application.add_handler(CallbackQueryHandler(handle_admin_callbacks, pattern="^(confirm_wipe|cancel_wipe)$"))
-    # ... [add all other handlers] ...
-    
+    # ... add all other handlers ...
+
     # Start HTTP server
     http_runner = await start_http_server()
     
     try:
+        # Send startup log using a new bot instance
+        startup_bot = Bot(token=BOT_TOKEN)
+        await send_log_to_channel(
+            f"🟢 <b>Bot Starting</b>\n"
+            f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+            bot=startup_bot
+        )
+        await startup_bot.close()
+
         # Initialize with clean update state
         await application.bot.delete_webhook(drop_pending_updates=True)
         
-        logger.info("Starting polling...")
-        await application.run_polling()
+        # Create a separate task for the polling
+        polling_task = asyncio.create_task(application.run_polling())
         
+        # Keep the application running
+        while True:
+            await asyncio.sleep(1)
+            
+    except asyncio.CancelledError:
+        logger.info("Received shutdown signal")
     except Exception as e:
         logger.error(f"Bot error: {e}")
+        # Send error log using a new bot instance
+        error_bot = Bot(token=BOT_TOKEN)
         await send_log_to_channel(
-            f"🔴 <b>Bot Crashed</b>\n"
+            f"🔴 <b>Bot Error</b>\n"
             f"⚠️ {type(e).__name__}\n"
-            f"📝 {str(e)}",
-            bot=application.bot
+            f"📝 {str(e)[:300]}",
+            bot=error_bot
         )
+        await error_bot.close()
     finally:
         logger.info("Shutting down...")
+        # Send shutdown log using a new bot instance
+        shutdown_bot = Bot(token=BOT_TOKEN)
         await send_log_to_channel(
-            f"🛑 <b>Bot Stopped</b>\n"
+            f"🛑 <b>Bot Stopping</b>\n"
             f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-            bot=application.bot
+            bot=shutdown_bot
         )
+        await shutdown_bot.close()
+        
+        # Cleanup application if it was started
+        if 'application' in locals() and application.running:
+            await application.stop()
+            await application.shutdown()
+        
+        # Cleanup HTTP server
         await http_runner.cleanup()
+        logger.info("Bot stopped")
 if __name__ == "__main__":
     # Create and set event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     try:
-        loop.run_until_complete(main())
+        # Run main until complete
+        main_task = loop.create_task(main())
+        
+        # Handle keyboard interrupt
+        def shutdown():
+            main_task.cancel()
+            
+        loop.add_signal_handler(signal.SIGINT, shutdown)
+        loop.add_signal_handler(signal.SIGTERM, shutdown)
+        
+        loop.run_until_complete(main_task)
+        
     except KeyboardInterrupt:
-        logger.info("Received shutdown signal")
+        logger.info("Bot shutting down...")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
     finally:
         loop.close()
-        logger.info("Bot stopped")
