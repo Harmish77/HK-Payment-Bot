@@ -4,6 +4,7 @@ import sys
 import logging
 import asyncio
 import signal
+import traceback
 from datetime import datetime, timezone
 from typing import Dict, Optional, List
 
@@ -27,6 +28,25 @@ from telegram.ext import (
     CallbackContext,
 )
 from aiohttp import web
+
+async def send_log_to_channel(message: str, context: ContextTypes.DEFAULT_TYPE = None, photo: str = None):
+    """Send logs to the designated log channel"""
+    try:
+        if photo:
+            await context.bot.send_photo(
+                chat_id=LOG_CHANNEL_ID,
+                photo=photo,
+                caption=message[:1000],  # Telegram caption limit
+                parse_mode="HTML"
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=LOG_CHANNEL_ID,
+                text=message[:4000],  # Telegram message limit
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.error(f"Failed to send log to channel: {e}")
 
 # Configure logging
 logging.basicConfig(
@@ -131,9 +151,16 @@ async def register_new_user(user_id: int, username: str):
         logger.error(f"Failed to register user {user_id}: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command"""
-    user = update.message.from_user
+    user = update.effective_user
     await register_new_user(user.id, user.username)
+    
+    await send_log_to_channel(
+        f"👤 <b>New User</b>\n"
+        f"🆔 {user.id}\n"
+        f"👁 @{user.username}\n"
+        f"📛 {user.full_name}",
+        context=context
+    )
     
     await log_user_action(
         user_id=user.id,
@@ -222,7 +249,17 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "created_at": get_utc_now(),
         "screenshot_id": update.message.photo[-1].file_id
     }).inserted_id
-
+    # Send to log channel
+    await send_log_to_channel(
+        f"💰 <b>New Payment Submission</b>\n"
+        f"👤 @{payment_data['username']} (ID: {user.id})\n"
+        f"💳 TXN: {payment_data['transaction_id']}\n"
+        f"💵 ₹{payment_data['amount']}\n"
+        f"⏳ {payment_data['period_num']} {payment_data['period_unit']}\n"
+        f"🆔 <code>{payment_id}</code>",
+        context=context,
+        photo=update.message.photo[-1].file_id
+    )
     # Send to admin
     admin_msg = (
         f"📦 New Payment Submission\n\n"
@@ -267,8 +304,12 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     del context.user_data['pending_payment']
 
 async def my_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user payment history"""
-    user = update.message.from_user
+    user = update.effective_user
+    await send_log_to_channel(
+        f"📊 <b>Payment History Accessed</b>\n"
+        f"👤 @{user.username} (ID: {user.id})",
+        context=context
+    )
     payments = list(payments_collection.find({"user_id": user.id}).sort("created_at", -1).limit(10))
     
     await log_user_action(
@@ -387,7 +428,15 @@ async def handle_callback(update: Update, context: CallbackContext):
                 {"_id": payment_id},
                 {"$set": {"status": "approved", "updated_at": get_utc_now()}}
             )
-            
+            await send_log_to_channel(
+            f"✅ <b>Payment Approved</b>\n"
+            f"👤 User: @{payment['username']}\n"
+            f"💳 TXN: {payment['transaction_id']}\n"
+            f"💵 ₹{payment['amount']}\n"
+            f"🆔 <code>{payment_id}</code>\n"
+            f"👨‍💻 Admin: @{update.callback_query.from_user.username}",
+            context=context
+            )
             await context.bot.send_message(
                 payment["user_id"],
                 "🎉 Your payment has been approved!\n\n"
@@ -413,7 +462,14 @@ async def handle_callback(update: Update, context: CallbackContext):
                 {"_id": payment_id},
                 {"$set": {"status": "rejected", "updated_at": get_utc_now()}}
             )
-            
+            await send_log_to_channel(
+            f"❌ <b>Payment Rejected</b>\n"
+            f"👤 User: @{payment['username']}\n"
+            f"💳 TXN: {payment['transaction_id']}\n"
+            f"🆔 <code>{payment_id}</code>\n"
+            f"👨‍💻 Admin: @{update.callback_query.from_user.username}",
+            context=context
+            )
             await context.bot.send_message(
                 payment["user_id"],
                 "❌ Your payment was rejected.\n\n"
@@ -615,6 +671,20 @@ async def handle_admin_callbacks(update: Update, context: CallbackContext):
 async def health_check(request):
     """Health check endpoint for Koyeb"""
     return web.Response(text="OK")
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    error = context.error
+    tb = "".join(traceback.format_tb(error.__traceback__))
+    
+    await send_log_to_channel(
+        f"🔥 <b>Error Occurred</b>\n"
+        f"⚠️ {type(error).__name__}\n"
+        f"📝 {str(error)}\n"
+        f"🔄 Update: {update}\n"
+        f"<code>{tb[:3000]}</code>",  # Truncate long tracebacks
+        context=context
+    )
+    
+    logger.error(f"Exception: {error}\n{tb}")
 
 async def start_http_server():
     """Start a simple HTTP server for health checks"""
@@ -636,6 +706,12 @@ async def main():
     """Main entry point for the application"""
     # Setup the HTTP server first
     http_runner = await start_http_server()
+    await send_log_to_channel(
+        f"🟢 <b>Bot Started</b>\n"
+        f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"🖥 <code>{os.uname().nodename}</code>",
+        context=context
+    )
     
     # Then setup the bot
     application = Application.builder().token(BOT_TOKEN).build()
@@ -650,6 +726,7 @@ async def main():
     application.add_handler(CommandHandler("restart", restart_bot))
     application.add_handler(CommandHandler("view_logs", view_logs))
     application.add_handler(CommandHandler("user_logs", get_user_logs))
+    application.add_error_handler(error_handler)
     
     # Message handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_payment_message))
