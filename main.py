@@ -615,6 +615,20 @@ async def health_check(request):
     """Health check endpoint for Koyeb"""
     return web.Response(text="OK")
 
+async def start_http_server():
+    """Start a simple HTTP server for health checks"""
+    app = web.Application()
+    app.router.add_get("/healthz", health_check)  # Koyeb expects /healthz endpoint
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    site = web.TCPSite(runner, "0.0.0.0", PORT)  # Use the PORT from your config
+    await site.start()
+    
+    logger.info(f"HTTP server running on port {PORT}")
+    return runner  # Important for proper cleanup
+
 async def setup_bot():
     """Setup the Telegram bot application"""
     application = Application.builder().token(BOT_TOKEN).build()
@@ -640,29 +654,36 @@ async def setup_bot():
     
     return application
 
-async def start_http_server():
-    """Start the HTTP server for health checks"""
-    app = web.Application()
-    app.router.add_get('/healthz', health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"HTTP server started on port {PORT}")
-    return site
-
 async def main():
-    """Main async function to run both HTTP server and Telegram bot"""
-    # Setup both services
-    bot = await setup_bot()
-    http_server = await start_http_server()
+    """Main async function to run both services"""
+    # Setup bot
+    application = await setup_bot()
     
-    # Run the bot
-    await bot.run_polling()
+    # Start HTTP server (for health checks)
+    http_runner = await start_http_server()
+    
+    try:
+        # Run bot
+        await application.run_polling()
+    except asyncio.CancelledError:
+        logger.info("Received shutdown signal")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+    finally:
+        # Proper cleanup
+        logger.info("Shutting down...")
+        await http_runner.cleanup()
+        await application.stop()
+        await application.shutdown()
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        # Create a new event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Run the main function
+        loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("Bot shutting down...")
     except Exception as e:
