@@ -29,20 +29,24 @@ from telegram.ext import (
 )
 from aiohttp import web
 
-async def send_log_to_channel(message: str, context: ContextTypes.DEFAULT_TYPE = None, photo: str = None):
+async def send_log_to_channel(message: str, bot: Bot = None, photo: str = None):
     """Send logs to the designated log channel"""
+    if not LOG_CHANNEL_ID:
+        return
+        
     try:
+        bot = bot or Bot(token=BOT_TOKEN)
         if photo:
-            await context.bot.send_photo(
+            await bot.send_photo(
                 chat_id=LOG_CHANNEL_ID,
                 photo=photo,
-                caption=message[:1000],  # Telegram caption limit
+                caption=message[:1000],
                 parse_mode="HTML"
             )
         else:
-            await context.bot.send_message(
+            await bot.send_message(
                 chat_id=LOG_CHANNEL_ID,
-                text=message[:4000],  # Telegram message limit
+                text=message[:4000],
                 parse_mode="HTML"
             )
     except Exception as e:
@@ -155,11 +159,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await register_new_user(user.id, user.username)
     
     await send_log_to_channel(
-        f"👤 <b>New User</b>\n"
+        f"👤 <b>New User Started Bot</b>\n"
         f"🆔 {user.id}\n"
         f"👁 @{user.username}\n"
         f"📛 {user.full_name}",
-        context=context
+        bot=context.bot
     )
     
     await log_user_action(
@@ -185,8 +189,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_payment_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle payment message submission"""
-    user = update.message.from_user
+    user = update.effective_user
+    await send_log_to_channel(
+        f"📩 <b>Payment Message Received</b>\n"
+        f"👤 @{user.username}\n"
+        f"📝 {update.message.text[:100]}...",
+        bot=context.bot
+    )
+    #user = update.message.from_user
     await log_user_action(
         user_id=user.id,
         action="payment_submission",
@@ -254,10 +264,8 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 <b>New Payment Submission</b>\n"
         f"👤 @{payment_data['username']} (ID: {user.id})\n"
         f"💳 TXN: {payment_data['transaction_id']}\n"
-        f"💵 ₹{payment_data['amount']}\n"
-        f"⏳ {payment_data['period_num']} {payment_data['period_unit']}\n"
-        f"🆔 <code>{payment_id}</code>",
-        context=context,
+        f"💵 ₹{payment_data['amount']}",
+        bot=context.bot,
         photo=update.message.photo[-1].file_id
     )
     # Send to admin
@@ -308,7 +316,7 @@ async def my_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_log_to_channel(
         f"📊 <b>Payment History Accessed</b>\n"
         f"👤 @{user.username} (ID: {user.id})",
-        context=context
+        bot=context.bot
     )
     payments = list(payments_collection.find({"user_id": user.id}).sort("created_at", -1).limit(10))
     
@@ -337,6 +345,12 @@ async def my_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📋 Your Payment History:\n\n" + "\n".join(messages))
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admin = update.effective_user
+    await send_log_to_channel(
+        f"📈 <b>Stats Accessed</b>\n"
+        f"👨‍💻 Admin: @{admin.username}",
+        bot=context.bot
+    )
     """Show admin statistics"""
     if str(update.message.from_user.id) != ADMIN_CHAT_ID:
         await update.message.reply_text("❌ Admin only command.")
@@ -371,6 +385,12 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error retrieving statistics.")
 
 async def manage_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admin = update.effective_user
+    await send_log_to_channel(
+        f"📝 <b>Payment Management Accessed</b>\n"
+        f"👨‍💻 Admin: @{admin.username}",
+        bot=context.bot
+    )
     """Admin payment management"""
     if str(update.message.from_user.id) != ADMIN_CHAT_ID:
         await update.message.reply_text("❌ Admin only command.")
@@ -406,6 +426,29 @@ async def manage_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def handle_callback(update: Update, context: CallbackContext):
+    admin = update.callback_query.from_user
+    await send_log_to_channel(
+        f"🔄 <b>Admin Action Initiated</b>\n"
+        f"👨‍💻 @{admin.username}\n"
+        f"🔘 {update.callback_query.data}",
+        bot=context.bot
+    )
+    
+    if action == "approve":
+        await send_log_to_channel(
+            f"✅ <b>Payment Approved</b>\n"
+            f"👤 @{payment['username']}\n"
+            f"💳 {payment['transaction_id']}\n"
+            f"👨‍💻 @{admin.username}",
+            bot=context.bot
+        )
+    elif action == "reject":
+        await send_log_to_channel(
+            f"❌ <b>Payment Rejected</b>\n"
+            f"👤 @{payment['username']}\n"
+            f"👨‍💻 @{admin.username}",
+            bot=context.bot
+        )
     """Handle admin callbacks"""
     query = update.callback_query
     await query.answer()
@@ -427,15 +470,6 @@ async def handle_callback(update: Update, context: CallbackContext):
             payments_collection.update_one(
                 {"_id": payment_id},
                 {"$set": {"status": "approved", "updated_at": get_utc_now()}}
-            )
-            await send_log_to_channel(
-            f"✅ <b>Payment Approved</b>\n"
-            f"👤 User: @{payment['username']}\n"
-            f"💳 TXN: {payment['transaction_id']}\n"
-            f"💵 ₹{payment['amount']}\n"
-            f"🆔 <code>{payment_id}</code>\n"
-            f"👨‍💻 Admin: @{update.callback_query.from_user.username}",
-            context=context
             )
             await context.bot.send_message(
                 payment["user_id"],
@@ -462,14 +496,6 @@ async def handle_callback(update: Update, context: CallbackContext):
                 {"_id": payment_id},
                 {"$set": {"status": "rejected", "updated_at": get_utc_now()}}
             )
-            await send_log_to_channel(
-            f"❌ <b>Payment Rejected</b>\n"
-            f"👤 User: @{payment['username']}\n"
-            f"💳 TXN: {payment['transaction_id']}\n"
-            f"🆔 <code>{payment_id}</code>\n"
-            f"👨‍💻 Admin: @{update.callback_query.from_user.username}",
-            context=context
-            )
             await context.bot.send_message(
                 payment["user_id"],
                 "❌ Your payment was rejected.\n\n"
@@ -494,6 +520,13 @@ async def handle_callback(update: Update, context: CallbackContext):
         await query.edit_message_text("❌ Error processing request.")
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admin = update.effective_user
+    await send_log_to_channel(
+        f"📢 <b>Broadcast Initiated</b>\n"
+        f"👨‍💻 @{admin.username}\n"
+        f"✉️ {context.args[:50]}...",
+        bot=context.bot
+    )
     """Admin broadcast message to all users"""
     if str(update.message.from_user.id) != ADMIN_CHAT_ID:
         await update.message.reply_text("❌ Admin only command.")
@@ -678,10 +711,9 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     await send_log_to_channel(
         f"🔥 <b>Error Occurred</b>\n"
         f"⚠️ {type(error).__name__}\n"
-        f"📝 {str(error)}\n"
-        f"🔄 Update: {update}\n"
-        f"<code>{tb[:3000]}</code>",  # Truncate long tracebacks
-        context=context
+        f"📝 {str(error)[:300]}\n"
+        f"<code>{tb[:1000]}</code>",
+        bot=context.bot
     )
     
     logger.error(f"Exception: {error}\n{tb}")
@@ -704,19 +736,17 @@ async def start_http_server():
 
 async def main():
     """Main entry point for the application"""
-    # Setup the HTTP server first
-    http_runner = await start_http_server()
-    await send_log_to_channel(
-        f"🟢 <b>Bot Started</b>\n"
-        f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
-        f"🖥 <code>{os.uname().nodename}</code>",
-        context=context
-    )
-    
-    # Then setup the bot
+    # Initialize bot first
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Add all your handlers
+    # Now we can send startup log (using standalone bot instance)
+    await send_log_to_channel(
+        f"🟢 <b>Bot Started</b>\n"
+        f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        bot=application.bot
+    )
+    
+    # Add all handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("mypayments", my_payments))
     application.add_handler(CommandHandler("stats", stats))
@@ -737,24 +767,31 @@ async def main():
     application.add_handler(CallbackQueryHandler(handle_admin_callbacks, pattern="^(confirm_wipe|cancel_wipe)$"))
     # ... [add all other handlers] ...
     
+    # Start HTTP server
+    http_runner = await start_http_server()
+    
     try:
-        # Start the bot
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling()
+        # Initialize with clean update state
+        await application.bot.delete_webhook(drop_pending_updates=True)
         
-        # Keep the application running forever
-        while True:
-            await asyncio.sleep(3600)  # Sleep for 1 hour
-            
+        logger.info("Starting polling...")
+        await application.run_polling()
+        
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"Bot error: {e}")
+        await send_log_to_channel(
+            f"🔴 <b>Bot Crashed</b>\n"
+            f"⚠️ {type(e).__name__}\n"
+            f"📝 {str(e)}",
+            bot=application.bot
+        )
     finally:
         logger.info("Shutting down...")
-        if 'application' in locals():
-            await application.updater.stop()
-            await application.stop()
-            await application.shutdown()
+        await send_log_to_channel(
+            f"🛑 <b>Bot Stopped</b>\n"
+            f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+            bot=application.bot
+        )
         await http_runner.cleanup()
 if __name__ == "__main__":
     # Create and set event loop
