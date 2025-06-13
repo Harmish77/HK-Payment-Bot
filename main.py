@@ -182,7 +182,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 2. Handle payment links
     try:
         # Add Base64 padding if needed and decode
-        encoded = context.args[0] + '=' * (-len(context.args[0]) % 4
+        encoded = context.args[0] + '=' * (-len(context.args[0]) % 4)
         decoded = base64.b64decode(encoded).decode('utf-8')
         
         # Split into components
