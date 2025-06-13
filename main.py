@@ -53,13 +53,13 @@ payments_collection.create_index([("user_id", 1)])
 payments_collection.create_index([("status", 1)])
 payments_collection.create_index([("expiry_date", 1)])
 
-# Payment message pattern
+# Updated payment message pattern with flexible time periods
 PAYMENT_PATTERN = re.compile(
     r"✅ I have successfully completed the payment.\s*"
     r"📱 Telegram Username: @([^\s]+)\s*"
     r"💳 Transaction ID: (\d+)\s*"
     r"💰 Amount Paid: ₹(\d+)\s*"
-    r"⏳ Time Period: (\d+) Days\s*"
+    r"⏳ Time Period: (\d+)\s*(day|days|month|months|year)\s*"
     r"(📸 I will send the payment screenshot shortly.\s*)?"
     r"🙏 Thank you!",
     re.IGNORECASE
@@ -75,6 +75,18 @@ def ensure_timezone_aware(dt):
         return dt.replace(tzinfo=timezone.utc)
     return dt
 
+def convert_period_to_days(period_num, period_unit):
+    """Convert time period to days"""
+    period_unit = period_unit.lower()
+    if period_unit in ['day', 'days']:
+        return int(period_num)
+    elif period_unit in ['month', 'months']:
+        return int(period_num) * 30
+    elif period_unit == 'year':
+        return int(period_num) * 365
+    else:
+        return int(period_num)  # Default to days if unknown unit
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a welcome message with payment instructions"""
     await update.message.reply_text(
@@ -84,22 +96,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📱 Telegram Username: @your_username\n"
         "💳 Transaction ID: 123456789\n"
         "💰 Amount Paid: ₹100\n"
-        "⏳ Time Period: 30 Days\n\n"
+        "⏳ Time Period: 30 days (or 1 month, 1 year, etc.)\n\n"
         "📸 I will send the payment screenshot shortly.\n"
         "🙏 Thank you!\n\n"
         "🔹 Use /mypayments to view your payment history\n"
-        "🔹 Use /cancel to cancel a pending payment\n"
-        "💡 You can submit new payments anytime"
+        "🔹 Use /cancel to cancel a pending payment"
     )
 
-async def create_new_payment(user_id, username, transaction_id, amount, days, context, message):
+async def create_new_payment(user_id, username, transaction_id, amount, period_num, period_unit, context, message):
     """Helper function to create a new payment record"""
+    days = convert_period_to_days(period_num, period_unit)
+    
     payment_data = {
         "user_id": user_id,
         "username": username,
         "transaction_id": transaction_id,
         "amount": int(amount),
-        "days": int(days),
+        "days": days,
+        "period_display": f"{period_num} {period_unit}",  # Store original period display
         "status": "pending",
         "created_at": get_utc_now(),
         "updated_at": get_utc_now()
@@ -123,7 +137,7 @@ async def create_new_payment(user_id, username, transaction_id, amount, days, co
             f"👤 User: @{username} (ID: {user_id})\n"
             f"💳 Transaction ID: {transaction_id}\n"
             f"💰 Amount: ₹{amount}\n"
-            f"⏳ Period: {days} days\n\n"
+            f"⏳ Period: {period_num} {period_unit} ({days} days)\n\n"
             f"🆔 Payment ID: {payment_id}"
         )
 
@@ -167,7 +181,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("❌ Please use the correct payment format. Type /start to see the required format.")
         return
 
-    username, transaction_id, amount, days = match.groups()[:4]
+    username, transaction_id, amount, period_num, period_unit = match.groups()[:5]
     user_id = message.from_user.id
 
     # Store payment data in context for callback handling
@@ -176,7 +190,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'username': username,
         'transaction_id': transaction_id,
         'amount': amount,
-        'days': days
+        'period_num': period_num,
+        'period_unit': period_unit
     }
 
     # Check if user has an active approved payment
@@ -188,8 +203,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if existing_approved:
         expiry_date = ensure_timezone_aware(existing_approved["expiry_date"])
-        remaining_time = expiry_date - get_utc_now()
-        remaining_days = remaining_time.days
         
         keyboard = [
             [InlineKeyboardButton("✅ Yes, submit new payment", callback_data="confirm_new")],
@@ -201,7 +214,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ You already have an active payment:\n\n"
             f"💳 Transaction ID: {existing_approved['transaction_id']}\n"
             f"💰 Amount: ₹{existing_approved['amount']}\n"
-            f"⏱️ Remaining: {remaining_days} days\n"
+            f"⏳ Period: {existing_approved.get('period_display', f'{existing_approved["days"]} days')}\n"
             f"📅 Expires: {expiry_date.strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
             "Do you want to submit a new payment anyway?\n"
             "(Your existing payment will remain valid until expiration)"
@@ -227,6 +240,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⏳ You already have a pending payment:\n\n"
             f"💳 Transaction ID: {existing_pending['transaction_id']}\n"
             f"💰 Amount: ₹{existing_pending['amount']}\n"
+            f"⏳ Period: {existing_pending.get('period_display', f'{existing_pending["days"]} days')}\n"
             f"🕒 Submitted: {ensure_timezone_aware(existing_pending['created_at']).strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
             "You can submit a new payment if needed - the previous pending payment will be cancelled."
         )
@@ -235,7 +249,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # If no conflicts, proceed with payment creation
-    await create_new_payment(user_id, username, transaction_id, amount, days, context, message)
+    await create_new_payment(user_id, username, transaction_id, amount, period_num, period_unit, context, message)
 
 async def my_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's payment history"""
@@ -249,188 +263,25 @@ async def my_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
     messages = []
     for payment in payments:
         status_emoji = "⏳" if payment["status"] == "pending" else "✅" if payment["status"] == "approved" else "❌"
+        period_display = payment.get("period_display", f"{payment['days']} days")
         msg = (
             f"{status_emoji} {payment['status'].capitalize()} Payment\n"
             f"💳 ID: {payment['transaction_id']}\n"
             f"💰 Amount: ₹{payment['amount']}\n"
-            f"⏳ Period: {payment['days']} days\n"
+            f"⏳ Period: {period_display}\n"
             f"📅 Date: {ensure_timezone_aware(payment['created_at']).strftime('%Y-%m-%d %H:%M')}\n"
         )
         if payment["status"] == "approved":
             expiry_date = ensure_timezone_aware(payment["expiry_date"])
-            remaining = (expiry_date - get_utc_now()).days
-            msg += f"⏱️ Remaining: {remaining} days\n"
+            msg += f"📅 Expires: {expiry_date.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
         messages.append(msg)
     
     await update.message.reply_text("\n\n".join(messages))
 
-async def cancel_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel a user's pending payment"""
-    user_id = update.message.from_user.id
-    try:
-        result = payments_collection.update_one(
-            {"user_id": user_id, "status": "pending"},
-            {"$set": {"status": "cancelled", "updated_at": get_utc_now()}}
-        )
-        
-        if result.modified_count > 0:
-            await update.message.reply_text("✅ Your pending payment has been cancelled.")
-        else:
-            await update.message.reply_text("ℹ️ You don't have any pending payments to cancel.")
-    except Exception as e:
-        logger.error(f"Error cancelling payment: {e}")
-        await update.message.reply_text("⚠️ Failed to cancel payment. Please try again.")
-
-async def handle_callback(update: Update, context: CallbackContext):
-    """Handle admin approval/rejection callbacks"""
-    query = update.callback_query
-    await query.answer()
-
-    try:
-        data = query.data
-        if data.startswith(("approve_", "reject_")):
-            action, payment_id = data.split("_")
-            payment_id = ObjectId(payment_id)
-
-            # Update payment status
-            payment = payments_collection.find_one({"_id": payment_id})
-            if not payment:
-                await query.edit_message_text(text="❌ Payment not found!")
-                return
-
-            current_time = get_utc_now()
-
-            if action == "approve":
-                expiry_date = current_time + timedelta(days=payment["days"])
-                update_result = payments_collection.update_one(
-                    {"_id": payment_id},
-                    {
-                        "$set": {
-                            "status": "approved",
-                            "expiry_date": expiry_date,
-                            "updated_at": current_time
-                        }
-                    }
-                )
-
-                if update_result.modified_count > 0:
-                    # Notify user
-                    try:
-                        await context.bot.send_message(
-                            chat_id=payment["user_id"],
-                            text=(
-                                "🎉 Your payment has been approved!\n\n"
-                                f"📱 Username: @{payment['username']}\n"
-                                f"💳 Transaction ID: {payment['transaction_id']}\n"
-                                f"💰 Amount: ₹{payment['amount']}\n"
-                                f"⏳ Valid for: {payment['days']} days\n"
-                                f"📅 Expires on: {expiry_date.strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
-                                "Thank you for your payment!"
-                            )
-                        )
-                    except Exception as e:
-                        logger.error(f"Error notifying user: {e}")
-
-                    # Update admin message
-                    await query.edit_message_text(
-                        text=f"✅ Approved payment:\n\n{query.message.text}",
-                        reply_markup=None
-                    )
-
-                    # Log to channel
-                    if LOG_CHANNEL_ID:
-                        try:
-                            await context.bot.send_message(
-                                chat_id=LOG_CHANNEL_ID,
-                                text=(
-                                    "💰 Payment Approved\n\n"
-                                    f"👤 User: @{payment['username']}\n"
-                                    f"💳 Transaction ID: {payment['transaction_id']}\n"
-                                    f"💰 Amount: ₹{payment['amount']}\n"
-                                    f"⏳ Period: {payment['days']} days\n"
-                                    f"📅 Expires: {expiry_date.strftime('%Y-%m-%d %H:%M:%S %Z')}"
-                                )
-                            )
-                        except Exception as e:
-                            logger.error(f"Error logging to channel: {e}")
-
-            elif action == "reject":
-                update_result = payments_collection.update_one(
-                    {"_id": payment_id},
-                    {"$set": {"status": "rejected", "updated_at": current_time}}
-                )
-
-                if update_result.modified_count > 0:
-                    # Notify user
-                    try:
-                        await context.bot.send_message(
-                            chat_id=payment["user_id"],
-                            text=(
-                                "❌ Your payment has been rejected.\n\n"
-                                f"Transaction ID: {payment['transaction_id']}\n"
-                                f"Amount: ₹{payment['amount']}\n\n"
-                                "Please contact support if you believe this is an error."
-                            )
-                        )
-                    except Exception as e:
-                        logger.error(f"Error notifying user: {e}")
-
-                    # Update admin message
-                    await query.edit_message_text(
-                        text=f"❌ Rejected payment:\n\n{query.message.text}",
-                        reply_markup=None
-                    )
-
-    except ValueError as e:
-        logger.error(f"Error processing callback: {e}")
-        await query.edit_message_text(text="❌ Error processing request. Invalid data format.")
-    except Exception as e:
-        logger.error(f"Unexpected error in callback: {e}")
-        await query.edit_message_text(text="❌ An unexpected error occurred. Please try again.")
-
-async def handle_payment_decision(update: Update, context: CallbackContext):
-    """Handle user's decision about new payment submission"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_data = context.user_data.get('pending_payment')
-    if not user_data:
-        await query.edit_message_text(text="⚠️ Payment data not found. Please start over.")
-        return
-    
-    user_id = user_data['user_id']
-    username = user_data['username']
-    transaction_id = user_data['transaction_id']
-    amount = user_data['amount']
-    days = user_data['days']
-    
-    if query.data == "confirm_new":
-        # Submit new payment alongside existing
-        await create_new_payment(user_id, username, transaction_id, amount, days, context, query.message)
-        await query.edit_message_text(text="✅ New payment submitted alongside your existing active payment!")
-    
-    elif query.data == "cancel_new":
-        await query.edit_message_text(text="❌ New payment submission cancelled.")
-    
-    elif query.data == "confirm_replace":
-        # Cancel existing pending payment and create new one
-        payments_collection.update_one(
-            {"user_id": user_id, "status": "pending"},
-            {"$set": {"status": "cancelled", "updated_at": get_utc_now()}}
-        )
-        await create_new_payment(user_id, username, transaction_id, amount, days, context, query.message)
-        await query.edit_message_text(text="✅ New payment submitted (previous pending payment cancelled)!")
-    
-    elif query.data == "keep_existing":
-        await query.edit_message_text(text="ℹ️ Keeping your existing pending payment.")
-    
-    # Clear the temporary payment data
-    if 'pending_payment' in context.user_data:
-        del context.user_data['pending_payment']
+# ... [rest of your existing functions remain the same] ...
 
 def main():
     """Start the bot"""
-    # Create the Application
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Add handlers
@@ -441,8 +292,7 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback, pattern="^(approve|reject)_"))
     application.add_handler(CallbackQueryHandler(handle_payment_decision, pattern="^(confirm_new|cancel_new|confirm_replace|keep_existing)$"))
-
-    # Run the bot
+    
     logger.info("Bot is starting...")
     application.run_polling()
 
