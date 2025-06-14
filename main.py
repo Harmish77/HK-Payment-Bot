@@ -70,7 +70,7 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID")
 MONGODB_URI = os.getenv("MONGODB_URI")
 PORT = int(os.getenv("PORT", 8080))
-
+PREMIUM_BOT_TOKEN = os.getenv("PREMIUM_BOT_TOKEN")
 # Validate environment variables
 if not all([BOT_TOKEN, ADMIN_CHAT_ID, MONGODB_URI]):
     logger.error("Missing required environment variables")
@@ -119,6 +119,38 @@ def convert_period_to_days(period_num: str, period_unit: str) -> int:
         return int(period_num) * 365
     return int(period_num)
 
+def parse_time_period(period_str: str) -> str:
+    """Convert payment period to premium bot command format"""
+    period_str = period_str.lower().strip()
+    
+    # Remove plural 's' if present
+    if period_str.endswith('s'):
+        period_str = period_str[:-1]
+    
+    # Standardize units
+    unit_mapping = {
+        'mon': 'month',
+        'hr': 'hour',
+        'min': 'minute',
+        'day': 'day',
+        'year': 'year'
+    }
+    
+    # Extract number and unit
+    match = re.match(r'(\d+)([a-zA-Z]+)', period_str)
+    if not match:
+        return "1month"  # Default if parsing fails
+    
+    num = match.group(1)
+    unit = match.group(2)
+    
+    # Map to standard unit
+    for short, long in unit_mapping.items():
+        if unit.startswith(short):
+            unit = long
+            break
+    
+    return f"{num}{unit}"
 async def log_user_action(user_id: int, action: str, details: Dict = None):
     """Log user actions to database"""
     try:
@@ -473,12 +505,6 @@ async def handle_callback(update: Update, context: CallbackContext):
             await query.message.reply_text("❌ Payment not found!")
             return
 
-        # Ensure all required fields exist
-        payment.setdefault('period', 'N/A')
-        payment.setdefault('transaction_id', 'Unknown')
-        payment.setdefault('username', 'Unknown')
-        payment.setdefault('amount', 0)
-
         if action == "approve":
             # Update database with all fields
             update_result = payments_collection.update_one(
@@ -505,6 +531,33 @@ async def handle_callback(update: Update, context: CallbackContext):
                 )
             except Exception as notify_error:
                 logger.error(f"Failed to notify user: {notify_error}")
+
+            # NEW: Send command to premium bot
+            if PREMIUM_BOT_TOKEN:
+                try:
+                    # Parse the period from payment (assuming format like "10days", "3months", etc.)
+                    period_match = re.match(r'(\d+)([a-zA-Z]+)', payment['period'].lower())
+                    if period_match:
+                        period_num = period_match.group(1)
+                        period_unit = period_match.group(2)
+                        
+                        # Convert to singular form for the command
+                        if period_unit.endswith('s'):
+                            period_unit = period_unit[:-1]
+                        
+                        premium_bot = Bot(token=PREMIUM_BOT_TOKEN)
+                        await premium_bot.send_message(
+                            chat_id=ADMIN_CHAT_ID,  # Or specific chat where the premium bot listens
+                            text=f"/add_premium {payment['user_id']} {period_num}{period_unit}"
+                        )
+                        await premium_bot.close()
+                except Exception as e:
+                    logger.error(f"Failed to send to premium bot: {e}")
+                    await send_log_to_channel(
+                        f"⚠️ Failed to notify premium bot for user {payment['user_id']}\n"
+                        f"Error: {str(e)[:200]}",
+                        bot=context.bot
+                    )
 
         elif action == "reject":
             # Update database
