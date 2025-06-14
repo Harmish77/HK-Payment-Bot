@@ -513,7 +513,7 @@ async def handle_callback(update: Update, context: CallbackContext):
                     "status": "approved",
                     "approved_at": get_utc_now(),
                     "approved_by": query.from_user.username,
-                    "period_display": payment['period']  # Store the original period
+                    "period_display": payment['period']
                 }}
             )
             
@@ -532,44 +532,31 @@ async def handle_callback(update: Update, context: CallbackContext):
             except Exception as notify_error:
                 logger.error(f"Failed to notify user: {notify_error}")
 
-            # NEW: Send command to premium bot
+            # Send command to premium bot if configured
             if PREMIUM_BOT_TOKEN:
-        try:
-            # Parse the period
-            period_match = re.match(r'(\d+)([a-zA-Z]+)', payment['period'].lower())
-            if period_match:
-                period_num = period_match.group(1)
-                period_unit = period_match.group(2)
-                
-                # Standardize units
-                unit_mapping = {
-                    'day': 'day', 'days': 'day',
-                    'month': 'month', 'months': 'month',
-                    'year': 'year', 'years': 'year',
-                    'hour': 'hour', 'hours': 'hour',
-                    'min': 'min', 'mins': 'min',
-                    'minute': 'min', 'minutes': 'min'
-                }
-                period_unit = unit_mapping.get(period_unit, 'month')
-                
-                # Get the payment bot's own user ID
-                me = await context.bot.get_me()
-                payment_bot_id = me.id
-                
-                # Send command as the payment bot (admin)
-                premium_bot = Bot(token=PREMIUM_BOT_TOKEN)
-                await premium_bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    text=f"/add_premium {payment['user_id']} {period_num}{period_unit}"
-                )
-                
-                # Log success
-                await send_log_to_channel(
-                    f"⚡ Premium activated for {payment['user_id']}",
-                    bot=context.bot
-                )
-                
-                await premium_bot.close()
+                try:
+                    period_match = re.match(r'(\d+)([a-zA-Z]+)', payment['period'].lower())
+                    if period_match:
+                        period_num = period_match.group(1)
+                        period_unit = period_match.group(2)
+                        
+                        # Convert to singular form for the command
+                        if period_unit.endswith('s'):
+                            period_unit = period_unit[:-1]
+                        
+                        premium_bot = Bot(token=PREMIUM_BOT_TOKEN)
+                        await premium_bot.send_message(
+                            chat_id=ADMIN_CHAT_ID,
+                            text=f"/add_premium {payment['user_id']} {period_num}{period_unit}"
+                        )
+                        await premium_bot.close()
+                except Exception as e:
+                    logger.error(f"Failed to send to premium bot: {e}")
+                    await send_log_to_channel(
+                        f"⚠️ Failed to notify premium bot for user {payment['user_id']}\n"
+                        f"Error: {str(e)[:200]}",
+                        bot=context.bot
+                    )
 
         elif action == "reject":
             # Update database
