@@ -70,7 +70,7 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID")
 MONGODB_URI = os.getenv("MONGODB_URI")
 PORT = int(os.getenv("PORT", 8080))
-PREMIUM_BOT_TOKEN = os.getenv("PREMIUM_BOT_TOKEN")
+PREMIUM_APPROVAL_GROUP_ID = os.getenv("PREMIUM_APPROVAL_GROUP_ID")
 # Validate environment variables
 if not all([BOT_TOKEN, ADMIN_CHAT_ID, MONGODB_URI]):
     logger.error("Missing required environment variables")
@@ -532,31 +532,44 @@ async def handle_callback(update: Update, context: CallbackContext):
             except Exception as notify_error:
                 logger.error(f"Failed to notify user: {notify_error}")
 
-            # Send command to premium bot if configured
-            if PREMIUM_BOT_TOKEN:
-                try:
-                    period_match = re.match(r'(\d+)([a-zA-Z]+)', payment['period'].lower())
-                    if period_match:
-                        period_num = period_match.group(1)
-                        period_unit = period_match.group(2)
-                        
-                        # Convert to singular form for the command
-                        if period_unit.endswith('s'):
-                            period_unit = period_unit[:-1]
-                        
-                        premium_bot = Bot(token=PREMIUM_BOT_TOKEN)
-                        await premium_bot.send_message(
-                            chat_id=ADMIN_CHAT_ID,
-                            text=f"/add_premium {payment['user_id']} {period_num}{period_unit}"
-                        )
-                        await premium_bot.close()
-                except Exception as e:
-                    logger.error(f"Failed to send to premium bot: {e}")
-                    await send_log_to_channel(
-                        f"⚠️ Failed to notify premium bot for user {payment['user_id']}\n"
-                        f"Error: {str(e)[:200]}",
-                        bot=context.bot
+            # Send command to group instead of premium bot
+            try:
+                period_match = re.match(r'(\d+)([a-zA-Z]+)', payment['period'].lower())
+                if period_match:
+                    period_num = period_match.group(1)
+                    period_unit = period_match.group(2)
+                    
+                    # Convert to singular form for the command
+                    if period_unit.endswith('s'):
+                        period_unit = period_unit[:-1]
+                    
+                    # Send directly to group
+                    await context.bot.send_message(
+                        chat_id=PREMIUM_APPROVAL_GROUP_ID,
+                        text=f"/add_premium {payment['user_id']} {period_num}{period_unit}",
+                        disable_notification=True
                     )
+                    
+                    # Optional: Add copy button
+                    await context.bot.send_message(
+                        chat_id=PREMIUM_APPROVAL_GROUP_ID,
+                        text="Quick actions:",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton(
+                                "📋 Copy Command", 
+                                callback_data=f"copy_{payment['user_id']}_{period_num}{period_unit}"
+                            )
+                        ]])
+                    )
+                    
+            except Exception as e:
+                logger.error(f"Failed to send to group: {e}")
+                await send_log_to_channel(
+                    f"⚠️ Failed to send premium command to group\n"
+                    f"User: {payment['user_id']}\n"
+                    f"Error: {str(e)[:200]}",
+                    bot=context.bot
+                )
 
         elif action == "reject":
             # Update database
