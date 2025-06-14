@@ -294,16 +294,17 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Save to database - ensure all keys match what's stored in context.user_data
         payment_id = payments_collection.insert_one({
-            "user_id": user.id,
-            "username": payment_data['username'],
-            "transaction_id": payment_data['transaction_id'],  # Handles both versions
-            "amount": int(payment_data['amount']),
-            "period": payment_data['period'],
-            "status": "pending",
-            "source": payment_data.get('source', 'web_form'),
-            "created_at": get_utc_now(),
-            "screenshot_id": update.message.photo[-1].file_id
-        }).inserted_id
+        "user_id": user.id,
+        "username": payment_data['username'],
+        "transaction_id": payment_data['transaction_id'],
+        "amount": int(payment_data['amount']),
+        "period": payment_data['period'],
+        "period_display": payment_data.get('period_display', payment_data['period']),
+        "status": "pending",
+        "source": payment_data.get('source', 'bot'),
+        "created_at": get_utc_now(),
+        "screenshot_id": update.message.photo[-1].file_id
+    }).inserted_id
         
         # Notify admin
         await context.bot.send_photo(
@@ -344,21 +345,9 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ An error occurred. Please contact support."
         )
 
-
 async def my_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await send_log_to_channel(
-        f"📊 <b>Payment History Accessed</b>\n"
-        f"👤 @{user.username} (ID: {user.id})",
-        bot=context.bot
-    )
     payments = list(payments_collection.find({"user_id": user.id}).sort("created_at", -1).limit(10))
-    
-    await log_user_action(
-        user_id=user.id,
-        action="command",
-        details={"command": "mypayments"}
-    )
     
     if not payments:
         await update.message.reply_text("📭 You don't have any payment history yet.")
@@ -366,12 +355,17 @@ async def my_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     messages = []
     for payment in payments:
+        # Format period if period_display doesn't exist
+        period = payment.get('period_display') 
+        if not period:
+            period = re.sub(r'(\d+)([a-zA-Z]+)', r'\1 \2', payment.get('period', 'N/A'))
+        
         status_emoji = "⏳" if payment["status"] == "pending" else "✅" if payment["status"] == "approved" else "❌"
         msg = (
             f"{status_emoji} {payment['status'].capitalize()}\n"
             f"💳 ID: {payment['transaction_id']}\n"
             f"💰 Amount: ₹{payment['amount']}\n"
-            f"⏳ Period: {payment.get('period_display', 'N/A')}\n"
+            f"⏳ Period: {period}\n"
             f"📅 Date: {payment['created_at'].strftime('%Y-%m-%d %H:%M')}\n"
         )
         messages.append(msg)
@@ -464,54 +458,57 @@ async def handle_callback(update: Update, context: CallbackContext):
     await query.answer()
     
     try:
+        # Parse callback data
         action, payment_id = query.data.split('_')
         payment_id = ObjectId(payment_id)
         
+        # Verify admin
         if str(query.from_user.id) != ADMIN_CHAT_ID:
             await query.message.reply_text("❌ Admin only action.")
             return
 
+        # Get complete payment data
         payment = payments_collection.find_one({"_id": payment_id})
         if not payment:
             await query.message.reply_text("❌ Payment not found!")
             return
 
+        # Ensure all required fields exist
+        payment.setdefault('period', 'N/A')
+        payment.setdefault('transaction_id', 'Unknown')
+        payment.setdefault('username', 'Unknown')
+        payment.setdefault('amount', 0)
+
         if action == "approve":
-            payments_collection.update_one(
+            # Update database with all fields
+            update_result = payments_collection.update_one(
                 {"_id": payment_id},
                 {"$set": {
-                    "status": "approved", 
+                    "status": "approved",
                     "approved_at": get_utc_now(),
-                    "approved_by": query.from_user.username
+                    "approved_by": query.from_user.username,
+                    "period_display": payment['period']  # Store the original period
                 }}
             )
             
+            if update_result.modified_count == 0:
+                raise ValueError("Failed to update payment status")
+
             # Notify user
-            await context.bot.send_message(
-                payment["user_id"],
-                "🎉 Your payment has been approved!\n\n"
-                f"💳 Transaction ID: {payment['transaction_id']}\n"
-                f"💰 Amount: ₹{payment['amount']}\n"
-                f"⏳ Period: {payment['period']}\n\n"
-                "You now have premium access!"
-            )
-            
-            # Log to channel
-            await send_log_to_channel(
-                f"✅ <b>Payment Approved</b>\n"
-                f"👤 User: @{payment['username']}\n"
-                f"💳 TXN: {payment['transaction_id']}\n"
-                f"💰 ₹{payment['amount']}\n"
-                f"👨‍💻 Admin: @{query.from_user.username}",
-                bot=context.bot
-            )
-            
-            await query.edit_message_text(
-                f"✅ Approved payment {payment['transaction_id']}",
-                reply_markup=None
-            )
+            try:
+                await context.bot.send_message(
+                    chat_id=payment["user_id"],
+                    text=f"🎉 Payment Approved!\n\n"
+                         f"💳 TXN: {payment['transaction_id']}\n"
+                         f"💰 Amount: ₹{payment['amount']}\n"
+                         f"⏳ Period: {payment['period']}"
+                )
+            except Exception as notify_error:
+                logger.error(f"Failed to notify user: {notify_error}")
+
         elif action == "reject":
-            payments_collection.update_one(
+            # Update database
+            update_result = payments_collection.update_one(
                 {"_id": payment_id},
                 {"$set": {
                     "status": "rejected",
@@ -520,38 +517,58 @@ async def handle_callback(update: Update, context: CallbackContext):
                 }}
             )
             
+            if update_result.modified_count == 0:
+                raise ValueError("Failed to update payment status")
+
             # Notify user
-            await context.bot.send_message(
-                payment["user_id"],
-                "❌ Your payment was rejected.\n\n"
-                f"Transaction ID: {payment['transaction_id']}\n\n"
-                "Please contact support if you believe this was an error."
-            )
-            
-            # Log to channel
-            await send_log_to_channel(
-                f"❌ <b>Payment Rejected</b>\n"
-                f"👤 User: @{payment['username']}\n"
-                f"💳 TXN: {payment['transaction_id']}\n"
-                f"👨‍💻 Admin: @{query.from_user.username}",
-                bot=context.bot
-            )
-            
+            try:
+                await context.bot.send_message(
+                    chat_id=payment["user_id"],
+                    text=f"❌ Payment Rejected\n\n"
+                         f"TXN: {payment['transaction_id']}\n"
+                         f"Contact support if this is an error."
+                )
+            except Exception as notify_error:
+                logger.error(f"Failed to notify user: {notify_error}")
+
+        # Update admin message
+        try:
             await query.edit_message_text(
-                f"❌ Rejected payment {payment['transaction_id']}",
+                f"✅ {action.capitalize()}d payment {payment['transaction_id']}",
                 reply_markup=None
             )
-            
-    except Exception as e:  # Fixed indentation
-        logger.error(f"Callback error: {e}")
+        except Exception as edit_error:
+            logger.warning(f"Message edit failed: {edit_error}")
+            await query.message.reply_text(
+                f"✅ {action.capitalize()}d payment {payment['transaction_id']}"
+            )
+
+        # Log successful action
         await send_log_to_channel(
-            f"🔥 <b>Callback Error</b>\n"
-            f"⚠️ {type(e).__name__}\n"
-            f"📝 {str(e)[:300]}",
+            f"🔹 <b>Payment {action.capitalize()}d</b>\n"
+            f"👤 User: @{payment['username']}\n"
+            f"💳 TXN: {payment['transaction_id']}\n"
+            f"👨‍💻 Admin: @{query.from_user.username}",
             bot=context.bot
         )
-        await query.message.reply_text("❌ Error processing request")
 
+    except Exception as e:
+        logger.error(f"Callback processing failed: {str(e)}", exc_info=True)
+        error_msg = (
+            f"🔥 <b>Callback Error</b>\n"
+            f"⚠️ {type(e).__name__}\n"
+            f"🔗 Action: {action}\n"
+            f"🆔 Payment: {payment_id}\n"
+            f"📝 {str(e)[:200]}"
+        )
+        await send_log_to_channel(error_msg, bot=context.bot)
+        
+        try:
+            await query.message.reply_text(
+                "⚠️ Failed to process request. Admins have been notified."
+            )
+        except Exception as fallback_error:
+            logger.error(f"Couldn't send error message: {fallback_error}")
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin = update.effective_user
