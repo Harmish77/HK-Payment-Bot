@@ -13,15 +13,7 @@ import pymongo
 from bson import ObjectId
 from dotenv import load_dotenv
 from telegram import (Update,InlineKeyboardButton,InlineKeyboardMarkup,InputMediaPhoto,ReplyKeyboardRemove,Bot)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
-    ContextTypes,
-    CallbackContext,
-)
+from telegram.ext import (Application,CommandHandler,MessageHandler,CallbackQueryHandler,Updater,filters,ContextTypes,CallbackContext)
 from aiohttp import web
 async def send_log_to_channel(message: str, bot: Bot = None, photo: str = None):
     """Send logs to the designated log channel"""
@@ -195,7 +187,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 5. Store payment data
             context.user_data['payment'] = {
                 'username': username,
-                'txn_id': txn_id,
+                'transaction_id': txn_id,
                 'amount': amount,
                 'period': period,
                 'period_display': period_display,
@@ -304,7 +296,7 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payment_id = payments_collection.insert_one({
             "user_id": user.id,
             "username": payment_data['username'],
-            "transaction_id": payment_data.get('txn_id') or payment_data.get('transaction_id'),  # Handles both versions
+            "transaction_id": payment_data['transaction_id'],  # Handles both versions
             "amount": int(payment_data['amount']),
             "period": payment_data['period'],
             "status": "pending",
@@ -467,7 +459,6 @@ async def manage_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-
 async def handle_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
@@ -477,16 +468,15 @@ async def handle_callback(update: Update, context: CallbackContext):
         payment_id = ObjectId(payment_id)
         
         if str(query.from_user.id) != ADMIN_CHAT_ID:
-            await query.edit_message_text("❌ Admin only action.")
+            await query.message.reply_text("❌ Admin only action.")
             return
 
         payment = payments_collection.find_one({"_id": payment_id})
         if not payment:
-            await query.edit_message_text("❌ Payment not found!")
+            await query.message.reply_text("❌ Payment not found!")
             return
 
         if action == "approve":
-            # Update payment status
             payments_collection.update_one(
                 {"_id": payment_id},
                 {"$set": {
@@ -520,9 +510,7 @@ async def handle_callback(update: Update, context: CallbackContext):
                 f"✅ Approved payment {payment['transaction_id']}",
                 reply_markup=None
             )
-
         elif action == "reject":
-            # Update payment status
             payments_collection.update_one(
                 {"_id": payment_id},
                 {"$set": {
@@ -554,7 +542,7 @@ async def handle_callback(update: Update, context: CallbackContext):
                 reply_markup=None
             )
             
-    except Exception as e:
+    except Exception as e:  # Fixed indentation
         logger.error(f"Callback error: {e}")
         await send_log_to_channel(
             f"🔥 <b>Callback Error</b>\n"
@@ -562,7 +550,8 @@ async def handle_callback(update: Update, context: CallbackContext):
             f"📝 {str(e)[:300]}",
             bot=context.bot
         )
-        await query.edit_message_text("❌ Error processing request")
+        await query.message.reply_text("❌ Error processing request")
+
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin = update.effective_user
@@ -765,18 +754,22 @@ async def health_check(request):
     return web.Response(text="OK")
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     error = context.error
-    tb = "".join(traceback.format_tb(error.__traceback__))
+    tb = traceback.format_exc()
+    
+    error_msg = (
+        f"⚠️ Error: {str(error)[:200]}\n"
+        f"🔹 Update: {update.to_dict() if update else 'None'}"
+    )
     
     await send_log_to_channel(
-        f"🔥 <b>Error Occurred</b>\n"
-        f"⚠️ {type(error).__name__}\n"
-        f"📝 {str(error)[:300]}\n"
-        f"<code>{tb[:1000]}</code>",
+        f"🔥 <b>Error Occurred</b>\n{error_msg}\n<code>{tb[:1000]}</code>",
         bot=context.bot
     )
     
-    logger.error(f"Exception: {error}\n{tb}")
-
+    if update and update.effective_message:
+        await update.effective_message.reply_text(
+            "An error occurred. Our team has been notified."
+        )
 async def start_http_server():
     """Start a simple HTTP server for health checks"""
     app = web.Application()
