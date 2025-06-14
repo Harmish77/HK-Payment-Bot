@@ -280,13 +280,12 @@ async def handle_payment_message(update: Update, context: ContextTypes.DEFAULT_T
 
     await update.message.reply_text("✅ Payment details received. Please now send your payment screenshot as a photo.")
 
-
 async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
     if 'payment' not in context.user_data:
         await update.message.reply_text(
-            "Please submit payment details first.",
+            "Please submit payment details first via our website:",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("Payment Form", url="https://harmish77.github.io/HK_payment_V0/")]
             ])
@@ -295,46 +294,64 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     payment_data = context.user_data['payment']
     
-    # Save to database
-    payment_id = payments_collection.insert_one({
-        "user_id": user.id,
-        "username": payment_data['username'],
-        "transaction_id": payment_data['transaction_id'],
-        "amount": payment_data['amount'],
-        "period": payment_data['period'],
-        "status": "pending",
-        "source": payment_data.get('source', 'bot'),
-        "created_at": get_utc_now(),
-        "screenshot_id": update.message.photo[-1].file_id
-    }).inserted_id
-    
-    # Notify admin
-    caption = (f"🌐 <b>Web Payment</b>\n\n" if payment_data.get('source') == 'web_form' else "") + \
-              f"👤 @{payment_data['username']} (ID: {user.id})\n" + \
-              f"💳 {payment_data['transaction_id']}\n" + \
-              f"💰 ₹{payment_data['amount']}\n" + \
-              f"⏳ {payment_data['period']}\n" + \
-              f"🆔 {payment_id}"
-    
-    await context.bot.send_photo(
-        chat_id=ADMIN_CHAT_ID,
-        photo=update.message.photo[-1].file_id,
-        caption=caption,
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Approve", callback_data=f"approve_{payment_id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"reject_{payment_id}")
-            ]
-        ]),
-        parse_mode="HTML"
-    )
-    
-    await update.message.reply_text(
-        "✅ Payment submitted for approval!\n"
-        "You'll be notified when processed."
-    )
-    
-    del context.user_data['payment']
+    # Additional validation
+    if not update.message.photo:
+        await update.message.reply_text("Please send the screenshot as a photo (not file).")
+        return
+        
+    try:
+        # Save to database - ensure all keys match what's stored in context.user_data
+        payment_id = payments_collection.insert_one({
+            "user_id": user.id,
+            "username": payment_data['username'],
+            "transaction_id": payment_data.get('txn_id') or payment_data.get('transaction_id'),  # Handles both versions
+            "amount": int(payment_data['amount']),
+            "period": payment_data['period'],
+            "status": "pending",
+            "source": payment_data.get('source', 'web_form'),
+            "created_at": get_utc_now(),
+            "screenshot_id": update.message.photo[-1].file_id
+        }).inserted_id
+        
+        # Notify admin
+        await context.bot.send_photo(
+            chat_id=ADMIN_CHAT_ID,
+            photo=update.message.photo[-1].file_id,
+            caption=(
+                f"🌐 <b>Payment Received</b>\n\n"
+                f"👤 User: @{payment_data['username']} (ID: {user.id})\n"
+                f"💳 TXN: {payment_data.get('txn_id') or payment_data.get('transaction_id')}\n"
+                f"💰 ₹{payment_data['amount']}\n"
+                f"⏳ Period: {payment_data['period']}\n"
+                f"🆔 Payment ID: {payment_id}"
+            ),
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f"approve_{payment_id}"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"reject_{payment_id}")
+                ]
+            ]),
+            parse_mode="HTML"
+        )
+        
+        await update.message.reply_text(
+            "✅ Verification submitted!\n\n"
+            "Your payment is now pending admin approval."
+        )
+        
+        del context.user_data['payment']
+        
+    except KeyError as e:
+        logger.error(f"Missing key in payment data: {e}")
+        await update.message.reply_text(
+            "⚠️ Payment data incomplete. Please start over."
+        )
+    except Exception as e:
+        logger.error(f"Screenshot handling error: {e}")
+        await update.message.reply_text(
+            "⚠️ An error occurred. Please contact support."
+        )
+
 
 async def my_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
