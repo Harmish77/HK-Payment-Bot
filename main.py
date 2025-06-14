@@ -550,18 +550,6 @@ async def handle_callback(update: Update, context: CallbackContext):
                         disable_notification=True
                     )
                     
-                    # Optional: Add copy button
-                    await context.bot.send_message(
-                        chat_id=PREMIUM_APPROVAL_GROUP_ID,
-                        text="Quick actions:",
-                        reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton(
-                                "📋 Copy Command", 
-                                callback_data=f"copy_{payment['user_id']}_{period_num}{period_unit}"
-                            )
-                        ]])
-                    )
-                    
             except Exception as e:
                 logger.error(f"Failed to send to group: {e}")
                 await send_log_to_channel(
