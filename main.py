@@ -495,133 +495,208 @@ async def handle_callback(update: Update, context: CallbackContext):
         payment_id = ObjectId(payment_id)
         
         # Verify admin
-        if str(query.from_user.id) != ADMIN_CHAT_ID:
+        admin = query.from_user
+        if str(admin.id) != ADMIN_CHAT_ID:
             await query.message.reply_text("❌ Admin only action.")
             return
 
-        # Get complete payment data
-        payment = payments_collection.find_one({"_id": payment_id})
+        # Get payment data efficiently
+        payment = payments_collection.find_one(
+            {"_id": payment_id},
+            {
+                "user_id": 1,
+                "username": 1,
+                "transaction_id": 1,
+                "amount": 1,
+                "period": 1,
+                "status": 1
+            }
+        )
         if not payment:
             await query.message.reply_text("❌ Payment not found!")
             return
 
         if action == "approve":
-            # Update database with all fields
+            # Update database with atomic operation
             update_result = payments_collection.update_one(
-                {"_id": payment_id},
+                {"_id": payment_id, "status": {"$ne": "approved"}},
                 {"$set": {
                     "status": "approved",
                     "approved_at": get_utc_now(),
-                    "approved_by": query.from_user.username,
-                    "period_display": payment['period']
+                    "approved_by": admin.username,
+                    "premium_activated": False
                 }}
             )
             
             if update_result.modified_count == 0:
-                raise ValueError("Failed to update payment status")
+                await query.answer("Payment already approved!", show_alert=True)
+                return
 
-            # Notify user
-            try:
-                await context.bot.send_message(
+            # Notify user in background
+            asyncio.create_task(
+                context.bot.send_message(
                     chat_id=payment["user_id"],
-                    text=f"🎉 Payment Approved!\n\n"
-                         f"💳 TXN: {payment['transaction_id']}\n"
-                         f"💰 Amount: ₹{payment['amount']}\n"
-                         f"⏳ Period: {payment['period']}"
-                )
-            except Exception as notify_error:
-                logger.error(f"Failed to notify user: {notify_error}")
-
-            # Send command to group instead of premium bot
-            try:
-                period_match = re.match(r'(\d+)([a-zA-Z]+)', payment['period'].lower())
-                if period_match:
-                    period_num = period_match.group(1)
-                    period_unit = period_match.group(2)
-                    
-                    # Convert to singular form for the command
-                    if period_unit.endswith('s'):
-                        period_unit = period_unit[:-1]
-                    
-                    # Send directly to group
-                    await context.bot.send_message(
-                        chat_id=PREMIUM_APPROVAL_GROUP_ID,
-                        text=f"/add_premium {payment['user_id']} {period_num}{period_unit}",
-                        disable_notification=True
+                    text=(
+                        "🎉 Payment Approved!\n\n"
+                        f"💳 TXN: {payment['transaction_id']}\n"
+                        f"💰 Amount: ₹{payment['amount']}\n"
+                        f"⏳ Period: {payment['period']}\n\n"
+                        "Your premium access is being processed..."
                     )
-                    
-            except Exception as e:
-                logger.error(f"Failed to send to group: {e}")
-                await send_log_to_channel(
-                    f"⚠️ Failed to send premium command to group\n"
-                    f"User: {payment['user_id']}\n"
-                    f"Error: {str(e)[:200]}",
-                    bot=context.bot
+                )
+            )
+
+            # Process premium activation
+            period_match = re.match(r'(\d+)(\w+)', payment['period'].lower())
+            if period_match:
+                period_num = period_match.group(1)
+                period_unit = period_match.group(2).rstrip('s')  # Remove plural
+                
+                # Standardize units
+                unit_mapping = {
+                    'month': 'month', 'mon': 'month',
+                    'year': 'year', 'yr': 'year',
+                    'day': 'day',
+                    'hour': 'hour', 'hr': 'hour',
+                    'min': 'min', 'minute': 'min'
+                }
+                period_unit = unit_mapping.get(period_unit, 'month')
+                
+                command = f"/add_premium {payment['user_id']} {period_num}{period_unit}"
+                
+                # Create interactive message for admin
+                keyboard = [
+                    [
+                        InlineKeyboardButton(
+                            "📋 Copy Command", 
+                            callback_data=f"copy_{base64.urlsafe_b64encode(command.encode()).decode()}"
+                        ),
+                        InlineKeyboardButton(
+                            "➡️ Open Premium Bot", 
+                            url=f"https://t.me/your_premium_bot?start=start"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "✅ Mark Completed", 
+                            callback_data=f"complete_{payment_id}"
+                        )
+                    ]
+                ]
+
+                # Send to admin's PM
+                await context.bot.send_message(
+                    chat_id=admin.id,
+                    text=(
+                        "🛎️ *Premium Activation Required*\n\n"
+                        f"👤 User ID: `{payment['user_id']}`\n"
+                        f"⏳ Period: {period_num} {period_unit}\n"
+                        f"💳 TXN: `{payment['transaction_id']}`\n\n"
+                        "Click below to copy the command and open the premium bot:"
+                    ),
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
         elif action == "reject":
-            # Update database
+            # Atomic rejection to prevent duplicates
             update_result = payments_collection.update_one(
-                {"_id": payment_id},
+                {"_id": payment_id, "status": {"$ne": "rejected"}},
                 {"$set": {
                     "status": "rejected",
                     "rejected_at": get_utc_now(),
-                    "rejected_by": query.from_user.username
+                    "rejected_by": admin.username
                 }}
             )
             
             if update_result.modified_count == 0:
-                raise ValueError("Failed to update payment status")
+                await query.answer("Payment already rejected!", show_alert=True)
+                return
 
             # Notify user
-            try:
-                await context.bot.send_message(
+            asyncio.create_task(
+                context.bot.send_message(
                     chat_id=payment["user_id"],
-                    text=f"❌ Payment Rejected\n\n"
-                         f"TXN: {payment['transaction_id']}\n"
-                         f"Contact support if this is an error."
+                    text=(
+                        "❌ Payment Rejected\n\n"
+                        f"TXN: {payment['transaction_id']}\n"
+                        "Contact support if this is an error."
+                    )
                 )
-            except Exception as notify_error:
-                logger.error(f"Failed to notify user: {notify_error}")
-
-        # Update admin message
-        try:
-            await query.edit_message_text(
-                f"✅ {action.capitalize()}d payment {payment['transaction_id']}",
-                reply_markup=None
-            )
-        except Exception as edit_error:
-            logger.warning(f"Message edit failed: {edit_error}")
-            await query.message.reply_text(
-                f"✅ {action.capitalize()}d payment {payment['transaction_id']}"
             )
 
-        # Log successful action
+        # Update original message
+        await query.edit_message_text(
+            f"✅ {action.capitalize()}d payment {payment['transaction_id']}\n"
+            f"{'Check your PM for activation details' if action == 'approve' else ''}",
+            reply_markup=None
+        )
+
+        # Log the action
         await send_log_to_channel(
-            f"🔹 <b>Payment {action.capitalize()}d</b>\n"
-            f"👤 User: @{payment['username']}\n"
+            f"🔹 Payment {action.capitalize()}d\n"
+            f"👤 User: {payment.get('username', payment['user_id'])}\n"
             f"💳 TXN: {payment['transaction_id']}\n"
-            f"👨‍💻 Admin: @{query.from_user.username}",
+            f"🛠️ By: @{admin.username}",
             bot=context.bot
         )
 
     except Exception as e:
-        logger.error(f"Callback processing failed: {str(e)}", exc_info=True)
-        error_msg = (
-            f"🔥 <b>Callback Error</b>\n"
-            f"⚠️ {type(e).__name__}\n"
-            f"🔗 Action: {action}\n"
-            f"🆔 Payment: {payment_id}\n"
-            f"📝 {str(e)[:200]}"
+        logger.error(f"Callback error: {str(e)}", exc_info=True)
+        await query.answer("⚠️ Processing failed. Check logs.", show_alert=True)
+        await send_log_to_channel(
+            f"🔥 Payment Processing Error\n"
+            f"Payment ID: {payment_id}\n"
+            f"Error: {str(e)[:200]}",
+            bot=context.bot
         )
-        await send_log_to_channel(error_msg, bot=context.bot)
+
+async def copy_command_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    try:
+        encoded_command = query.data.split('_', 1)[1]
+        command = base64.urlsafe_b64decode(encoded_command.encode()).decode()
+        await query.answer(f"Copied to clipboard:\n{command}", show_alert=True)
+    except Exception as e:
+        logger.error(f"Copy command error: {e}")
+        await query.answer("❌ Copy failed", show_alert=True)
+
+async def complete_premium_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    try:
+        payment_id = ObjectId(query.data.split('_')[1])
         
-        try:
-            await query.message.reply_text(
-                "⚠️ Failed to process request. Admins have been notified."
+        # Verify admin
+        if str(query.from_user.id) != ADMIN_CHAT_ID:
+            await query.answer("❌ Admin only", show_alert=True)
+            return
+            
+        # Update payment status
+        result = payments_collection.update_one(
+            {"_id": payment_id, "premium_activated": False},
+            {"$set": {
+                "premium_activated": True,
+                "activated_at": get_utc_now(),
+                "activated_by": query.from_user.username
+            }}
+        )
+        
+        if result.modified_count == 1:
+            await query.answer("✅ Premium activated", show_alert=True)
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "✅ Premium Activated", 
+                        callback_data="activated"
+                    )]
+                ])
             )
-        except Exception as fallback_error:
-            logger.error(f"Couldn't send error message: {fallback_error}")
+        else:
+            await query.answer("Already activated!", show_alert=True)
+            
+    except Exception as e:
+        logger.error(f"Complete premium error: {e}")
+        await query.answer("❌ Update failed", show_alert=True)
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin = update.effective_user
@@ -879,7 +954,8 @@ async def main():
     # Callback handlers
     application.add_handler(CallbackQueryHandler(handle_callback, pattern="^(approve|reject)_"))
     application.add_handler(CallbackQueryHandler(handle_admin_callbacks, pattern="^(confirm_wipe|cancel_wipe)$"))
-    # ... add all other handlers ...
+    application.add_handler(CallbackQueryHandler(copy_command_callback, pattern="^copy_"))
+    application.add_handler(CallbackQueryHandler(complete_premium_callback, pattern="^complete_"))
 
     # Start HTTP server
     http_runner = await start_http_server()
