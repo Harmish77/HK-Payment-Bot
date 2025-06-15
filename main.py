@@ -573,7 +573,7 @@ async def handle_callback(update: Update, context: CallbackContext):
                         ),
                         InlineKeyboardButton(
                             "➡️ Open Premium Bot", 
-                            url=f"https://t.me/your_premium_bot?start=start"
+                            url=f"https://t.me/hks_movie_bot?start=start"
                         )
                     ],
                     [
